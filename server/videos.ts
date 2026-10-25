@@ -32,6 +32,11 @@ function matchesVideoSignature(bytes: Buffer, mime: string) {
   if (mime === "video/webm") return bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
   return bytes.subarray(4, 8).toString("ascii") === "ftyp";
 }
+function bufferFromDatabaseValue(value: unknown): Buffer {
+  if (value instanceof ArrayBuffer) return Buffer.from(value);
+  if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  return Buffer.alloc(0);
+}
 export function videoIdFromMediaUrl(url: string | null | undefined): string | null {
   if (!url) return null;
   const match = url.match(/\/api\/media\/video\/([0-9a-f-]{36})$/i);
@@ -88,8 +93,7 @@ videos.post("/media/video/complete", requireAuth, requireVideoDatabase, async (r
     const check=await getVideoDatabase().execute({sql:"SELECT chunk_index,length(data) AS bytes FROM video_chunks WHERE video_id=? ORDER BY chunk_index",args:[id]});
     if (check.rows.length!==count || check.rows.some((row,i)=>Number(row.chunk_index)!==i || Number(row.bytes)!==(i===count-1?size-i*VIDEO_CHUNK_BYTES:VIDEO_CHUNK_BYTES))) return res.status(400).json({error:"動画の一部が未送信です。アップロードを再試行してください。"});
     const first=await getVideoDatabase().execute({sql:"SELECT data FROM video_chunks WHERE video_id=? AND chunk_index=0",args:[id]});
-    const bytes=first.rows[0]?.data;
-    const header=bytes instanceof ArrayBuffer ? Buffer.from(bytes) : Buffer.alloc(0);
+    const header=bufferFromDatabaseValue(first.rows[0]?.data);
     if (!matchesVideoSignature(header,String(r.rows[0].mime_type))) { await discard(id); return res.status(400).json({error:"動画の内容と形式が一致しません。"}); }
     await db.execute({sql:"UPDATE media_videos SET status='ready' WHERE id=?",args:[id]});
     res.json({ok:true,id});
@@ -111,7 +115,7 @@ async function servePlayable(req:Request,res:Response) {
     const first=Math.floor(start/VIDEO_CHUNK_BYTES), last=Math.floor(end/VIDEO_CHUNK_BYTES);
     const chunks=await getVideoDatabase().execute({sql:"SELECT chunk_index,data FROM video_chunks WHERE video_id=? AND chunk_index BETWEEN ? AND ? ORDER BY chunk_index",args:[id,first,last]});
     if(chunks.rows.length!==last-first+1) return res.status(500).end();
-    const parts=chunks.rows.map(x=>{const d=x.data;return d instanceof ArrayBuffer?Buffer.from(d):Buffer.alloc(0)});
+    const parts=chunks.rows.map(x=>bufferFromDatabaseValue(x.data));
     const combined=Buffer.concat(parts); const body=combined.subarray(start-first*VIDEO_CHUNK_BYTES,end-first*VIDEO_CHUNK_BYTES+1);
     res.status(range?206:200);res.setHeader("Content-Type",String(row.mime_type));res.setHeader("Accept-Ranges","bytes");res.setHeader("Content-Length",String(body.length));res.setHeader("Cache-Control",String(post.visibility)==="public"?"public, max-age=3600":"private, no-store");res.setHeader("X-Content-Type-Options","nosniff");if(range)res.setHeader("Content-Range",`bytes ${start}-${end}/${size}`);res.end(body);
   } catch { if(!res.headersSent)res.status(500).end(); else res.end(); }
