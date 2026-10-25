@@ -22,6 +22,12 @@ export async function initializeDatabase() {
       website TEXT,
       created_at TEXT NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS media_assets (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), mime_type TEXT NOT NULL,
+      file_name TEXT NOT NULL, size_bytes INTEGER NOT NULL, created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS media_chunks (media_id TEXT NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE, chunk_index INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(media_id, chunk_index))`,
+    `CREATE INDEX IF NOT EXISTS idx_media_user ON media_assets(user_id, created_at DESC)`,
     `CREATE TABLE IF NOT EXISTS posts (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id),
