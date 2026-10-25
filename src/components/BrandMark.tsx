@@ -1,5 +1,3 @@
-import { Link2 } from "lucide-react";
-
-export default function BrandMark({ size = 23 }: { size?: number }) {
-  return <span className="brand-mark" aria-label="SoraLink"><Link2 size={size} strokeWidth={2.4} /></span>;
+export default function BrandMark({ size = 35 }: { size?: number }) {
+  return <span className="brand-mark" aria-label="SoraLink"><img src="/images/soralink-logo.jpg" alt="SoraLink" width={size} height={size} /></span>;
 }
