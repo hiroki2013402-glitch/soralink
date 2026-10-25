@@ -1,47 +1,419 @@
-import {useCallback,useEffect,useMemo,useState} from "react";
-import {Bell,House,Plus,Search,UserRound,Heart,Users,ImagePlus,X,RefreshCw,Settings,Link as LinkIcon,Check,LoaderCircle,LogOut} from "lucide-react";
-import LoginPage from "./login/LoginPage";import CreatePost from "../components/CreatePost";import MediaPost from "../components/MediaPost";import {api} from "../lib/api";import type{User,Post,Story,Person,Notice}from"../types";
-type Tab="home"|"search"|"create"|"notifications"|"profile";
-const blankProfile={displayName:"",bio:"",website:"",avatarUrl:"",coverUrl:""};
-function Avatar({url,name,size="normal"}:{url:string|null|undefined;name:string;size?:"normal"|"large"|"small"}){return <span className={`avatar ${size}`}>{url?<img src={url} alt=""/>:name?.slice(0,1)||"S"}</span>}
-function timeAgo(v:string){const m=Math.max(0,Math.floor((Date.now()-new Date(v).getTime())/60000));if(m<1)return"たった今";if(m<60)return`${m}分前`;if(m<1440)return`${Math.floor(m/60)}時間前`;return`${Math.floor(m/1440)}日前`}
-export default function App(){
- const initialTab=():Tab=>{const part=location.pathname.split("/")[2] as Tab;return ["home","search","create","notifications","profile"].includes(part)?part:"home"};
- const[user,setUser]=useState<User|null>(null),[posts,setPosts]=useState<Post[]>([]),[stories,setStories]=useState<Story[]>([]),[tab,setTab]=useState<Tab>(initialTab),[loading,setLoading]=useState(true),[notice,setNotice]=useState(""),[error,setError]=useState(""),[search,setSearch]=useState(""),[people,setPeople]=useState<Person[]>([]),[notifications,setNotifications]=useState<Notice[]>([]),[profile,setProfile]=useState<User|null>(null),[profilePosts,setProfilePosts]=useState<Post[]>([]),[followers,setFollowers]=useState(0),[following,setFollowing]=useState(0),[followed,setFollowed]=useState(false),[editing,setEditing]=useState(false),[profileForm,setProfileForm]=useState(blankProfile),[saving,setSaving]=useState(false),[storyView,setStoryView]=useState<Story|null>(null),[storyLiked,setStoryLiked]=useState(false),[,setStoryComment]=useState(""),[liked,setLiked]=useState<Record<string,boolean>>({}),[unread,setUnread]=useState(0),[relationType,setRelationType]=useState<"followers"|"following"|null>(null),[relationUsers,setRelationUsers]=useState<Person[]>([]),[relationLoading,setRelationLoading]=useState(false);
- const tell=(s:string)=>{setNotice(s);window.setTimeout(()=>setNotice(""),3500)};
- const load=useCallback(async()=>{setLoading(true);setError("");try{const f=await api<{posts:Post[]}>('/feed');setPosts(f.posts);const st=await api<{stories:Story[]}>('/stories');setStories(st.stories);const me=await api<{user:User}>('/me').catch(()=>null);setUser(me?.user??null);if(me){const mine=await api<{ids:string[]}>('/likes/mine').catch(()=>({ids:[]}));setLiked(Object.fromEntries(mine.ids.map(id=>[id,true])))}else{setLiked({})}}catch(e){setError(e instanceof Error?e.message:"読み込みに失敗しました。")}finally{setLoading(false)}},[]);
- useEffect(()=>{const onPop=()=>{const part=location.pathname.split("/")[2] as Tab;setTab(["home","search","create","notifications","profile"].includes(part)?part:"home")};window.addEventListener("popstate",onPop);return()=>window.removeEventListener("popstate",onPop)},[]);
- useEffect(()=>{const wanted=user?`/page/${tab}`:"/page/login";if(location.pathname!==wanted)history.pushState({},"",wanted)},[tab,user?.id]);
- useEffect(()=>{void load();const params=new URLSearchParams(location.search);const authError=params.get("auth_error");if(authError){tell(authError);history.replaceState({},"",location.pathname)}},[load]);
- useEffect(()=>{if(tab!=="notifications"||!user)return;void api<{notifications:Notice[]}>('/notifications').then(r=>{setNotifications(r.notifications);setUnread(r.notifications.filter(n=>!n.read_at).length);return api('/notifications/read',{method:'POST'})}).catch(e=>tell(e.message))},[tab,user]);
- useEffect(()=>{if(!user){setProfile(null);return}if(tab==="profile")void openProfile(user.id)},[tab,user?.id]);
- const openProfile=useCallback(async(id:string)=>{try{const r=await api<{user:User;posts:Post[];followers:number;following:number;isFollowing:boolean}>(`/users/${encodeURIComponent(id)}`);setProfile(r.user);setProfilePosts(r.posts);setFollowers(r.followers);setFollowing(r.following);setFollowed(r.isFollowing);setTab("profile");setEditing(false)}catch(e){tell(e instanceof Error?e.message:"プロフィールを開けませんでした")}},[]);
- const createPost=async(input:{mediaType:"image"|"video";mediaUrl:string;caption:string;kind:"post"|"story"})=>{await api('/posts',{method:'POST',body:JSON.stringify(input)});await load();tell(input.kind==="story"?"ストーリーを公開しました（24時間で自動削除されます）。":"投稿を公開しました。");setTab("home")};
- const like=async(id:string)=>{if(!user)return tell("いいねするにはログインしてください。");try{const r=await api<{liked:boolean}>(`/posts/${id}/like`,{method:'POST'});setLiked(v=>({...v,[id]:r.liked}));setPosts(v=>v.map(p=>p.id===id?{...p,likes_count:Math.max(0,Number(p.likes_count)+(r.liked?1:-1))}:p));setProfilePosts(v=>v.map(p=>p.id===id?{...p,likes_count:Math.max(0,Number(p.likes_count)+(r.liked?1:-1))}:p))}catch(e){tell(e instanceof Error?e.message:"いいねできませんでした")}};
- const removePost=async(id:string)=>{if(!confirm("この投稿を削除しますか？"))return;try{await api(`/posts/${id}`,{method:'DELETE'});setPosts(v=>v.filter(p=>p.id!==id));setProfilePosts(v=>v.filter(p=>p.id!==id));tell("投稿を削除しました。")}catch(e){tell(e instanceof Error?e.message:"削除できませんでした")}};
- const runSearch=async(e?:React.FormEvent)=>{e?.preventDefault();if(!user){tell("ユーザー検索にはログインしてください。");return}setTab("search");if(!search.trim()){setPeople([]);return}try{const r=await api<{users:Person[]}>(`/users/search?q=${encodeURIComponent(search.trim())}`);setPeople(r.users)}catch(e){tell(e instanceof Error?e.message:"検索できませんでした")}};
- const toggleFollow=async(id:string)=>{try{const r=await api<{following:boolean}>(`/users/${id}/follow`,{method:'POST'});setFollowed(r.following);setFollowers(n=>Math.max(0,n+(r.following?1:-1)));tell(r.following?"フォローしました。":"フォローを解除しました。")}catch(e){tell(e instanceof Error?e.message:"フォローできませんでした")}};
- const openRelations=async(type:"followers"|"following")=>{if(!profile)return;setRelationType(type);setRelationLoading(true);try{const r=await api<{users:Person[]}>(`/users/${encodeURIComponent(profile.id)}/relations?type=${type}`);setRelationUsers(r.users)}catch(e){tell(e instanceof Error?e.message:"一覧を読み込めませんでした");setRelationType(null)}finally{setRelationLoading(false)}};
- const uploadProfileMedia=async(type:"avatarUrl"|"coverUrl",file:File)=>{const body=new FormData();body.append("file",file);try{const r=await api<{url:string}>("/media/upload",{method:"POST",body});setProfileForm(v=>({...v,[type]:r.url}));tell("画像をTursoにアップロードしました。")}catch(e){tell(e instanceof Error?e.message:"画像をアップロードできませんでした")}};
- const startEdit=()=>{if(!profile)return;setProfileForm({displayName:profile.display_name||"",bio:profile.bio||"",website:profile.website||"",avatarUrl:profile.avatar_url||"",coverUrl:profile.cover_url||""});setEditing(true)};
- const saveProfile=async(e:React.FormEvent)=>{e.preventDefault();setSaving(true);try{const r=await api<{user:User}>('/me/profile',{method:'PATCH',body:JSON.stringify(profileForm)});setUser(r.user);setProfile(r.user);setEditing(false);tell("プロフィールを保存しました。")}catch(e){tell(e instanceof Error?e.message:"保存できませんでした")}finally{setSaving(false)}};
- const logout=async()=>{try{await api('/auth/logout',{method:'POST'});setUser(null);setTab('home');tell("ログアウトしました。");}catch(e){tell(e instanceof Error?e.message:"ログアウトできませんでした")}};
- const nav:[Tab,string,any][]=[["home","ホーム",House],["search","検索",Search],["create","作成",Plus],["notifications","通知",Bell],["profile","マイページ",UserRound]];
- const visiblePosts=useMemo(()=>posts, [posts]);
- return <div className="app-shell">
- {!user?<LoginPage/>:<>
- <header className="topbar"><div className="header-left"><button className="mobile-logo" onClick={()=>setTab("home")}><span className="brand-mark"><LinkIcon size={23}/></span></button><span className="mobile-page-title">{nav.find(n=>n[0]===tab)?.[1]}</span></div><div className="header-right"><button className="brand brand-right" onClick={()=>setTab("home")}><span className="brand-mark"><LinkIcon size={23}/></span><span>SoraLink</span></button><form className="search-bar" onSubmit={runSearch} onClick={()=>{if(window.matchMedia("(max-width: 620px)").matches)setTab("search")}}><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="ユーザーを検索" aria-label="ユーザーを検索"/><button aria-label="検索"><Search size={16}/></button></form><button className={`header-icon ${tab==="notifications"?"active":""}`} onClick={()=>setTab("notifications")} aria-label="通知"><Bell size={21}/>{unread>0&&<i className="unread-dot"/>}</button><button className="header-avatar" onClick={()=>setTab("profile")} aria-label="マイページ"><Avatar url={user.avatar_url} name={user.display_name} size="small"/></button></div></header>
- <main className="main-layout"><aside className="left-sidebar" aria-label="メインメニュー"><button className={tab==="home"?"selected":""} onClick={()=>setTab("home")}><House size={21}/><span>ホーム</span></button><button className={tab==="search"?"selected":""} onClick={()=>setTab("search")}><Search size={21}/><span>検索</span></button><button className={tab==="create"?"selected":""} onClick={()=>setTab("create")}><Plus size={21}/><span>投稿を作成</span></button><button className={tab==="notifications"?"selected":""} onClick={()=>setTab("notifications")}><Bell size={21}/><span>通知</span>{unread>0&&<i className="sidebar-unread"/>}</button><button className={tab==="profile"?"selected":""} onClick={()=>{setTab("profile");void openProfile(user.id)}}><Avatar url={user.avatar_url} name={user.display_name} size="small"/><span>マイページ</span></button><div className="sidebar-divider"/><div className="sidebar-user"><Avatar url={user.avatar_url} name={user.display_name} size="small"/><span><strong>{user.display_name}</strong><small>SoraLink</small></span></div></aside><section className="main-column">
- {notice&&<div className="notice" role="status">{notice}<button onClick={()=>setNotice("")} aria-label="閉じる"><X size={15}/></button></div>}
- {tab==="home"&&<><div className="home-intro"><div><span className="eyebrow">YOUR WORLD, CONNECTED</span><h1>今日の瞬間を、<br/><em>シェアしよう。</em></h1><p>友達の近況や、新しい発見に出会おう。</p></div><div className="intro-art"><LinkIcon size={66}/></div></div><section className="stories-section"><div className="section-title"><h2>ストーリーズ</h2><span>24時間で消えます</span></div><div className="story-strip"><button className="story-item" onClick={()=>setTab("create")}><span className="story-ring add-story"><Avatar url={user.avatar_url} name={user.display_name}/><b>＋</b></span><span>ストーリー作成</span></button>{stories.map(s=><button className="story-item" key={s.id} onClick={()=>{setStoryView(s);setStoryLiked(false);setStoryComment("")}}><span className="story-ring"><Avatar url={s.avatar_url} name={s.display_name}/></span><span>{s.display_name}</span></button>)}</div></section><div className="feed-toolbar"><span>フィード</span><button className="refresh-button" onClick={()=>void load()} aria-label="投稿を更新"><RefreshCw size={17}/></button></div>{loading?<div className="loading-state"><LoaderCircle className="spin"/><span>投稿を読み込み中…</span></div>:error?<div className="empty-state"><p>{error}</p><button className="primary-button" onClick={()=>void load()}>再読み込み</button></div>:visiblePosts.length?<div className="post-list">{visiblePosts.map(p=><MediaPost key={p.id} post={p} user={user} onLike={like} onDelete={removePost} onProfile={id=>void openProfile(id)} liked={!!liked[p.id]}/>)}</div>:<div className="empty-state"><div className="empty-art"><ImagePlus size={28}/></div><h3>まだ投稿がありません</h3><p>最初の投稿をシェアしてみましょう。</p><button className="primary-button" onClick={()=>setTab("create")}>投稿を作成</button></div>}</>}
- {tab==="search"&&<section className="page-panel"><div className="page-heading"><span className="eyebrow">DISCOVER</span><h1>ユーザーを検索</h1><p>気になる人を見つけて、つながろう。</p></div><form className="large-search" onSubmit={runSearch}><Search size={20}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="ユーザー名で検索" autoFocus/><button className="primary-button">検索</button></form><div className="people-list">{people.map(p=><div className="person-row" key={p.id}><button className="plain-avatar" onClick={()=>void openProfile(p.id)}><Avatar url={p.avatar_url} name={p.display_name}/></button><button className="person-info" onClick={()=>void openProfile(p.id)}><strong>{p.display_name}</strong><span>{p.bio||"SoraLinkを利用しています"}</span></button><button className="outline-small" onClick={()=>void openProfile(p.id)}>プロフィール</button></div>)}</div>{search.trim()&&!people.length&&<p className="empty-inline">検索結果はここに表示されます。検索語を入力して検索してください。</p>}</section>}
- {tab==="create"&&<section className="page-panel"><div className="page-heading"><h1>投稿を作成</h1><p>写真や動画を選んで、友達とシェアしましょう。</p></div><CreatePost onCreate={createPost}/></section>}
- {tab==="notifications"&&<section className="page-panel"><div className="page-heading"><span className="eyebrow">ACTIVITY</span><h1>通知</h1><p>あなたの投稿やアカウントへのアクティビティ。</p></div>{notifications.length?<div className="notification-list">{notifications.map(n=><button className={`notification-row ${n.read_at?"":"unread"}`} key={n.id} onClick={()=>void openProfile(n.actor_id)}><Avatar url={n.avatar_url} name={n.display_name}/><span className="notification-copy"><strong>{n.display_name}</strong>{n.kind==="like"?" があなたの投稿にいいねしました。":" があなたをフォローしました。"}<small>{timeAgo(n.created_at)}</small></span><span className="notification-symbol">{n.kind==="like"?<Heart size={17}/>:<Users size={17}/>}</span></button>)}</div>:<div className="empty-state"><div className="empty-art"><Bell size={26}/></div><h3>まだ通知はありません</h3><p>いいねやフォローがあると、ここに表示されます。</p></div>}</section>}
- {tab==="profile"&&<section className="profile-page">{!profile?<div className="loading-state"><LoaderCircle className="spin"/>プロフィールを読み込み中…</div>:<><div className="cover-photo" style={profile.cover_url?{backgroundImage:`linear-gradient(0deg,#142d4b30,#142d4b08),url("${profile.cover_url}")`}:{}}><span className="cover-decoration"><LinkIcon size={52}/></span></div><div className="profile-main"><div className="profile-head"><Avatar url={profile.avatar_url} name={profile.display_name} size="large"/><div className="profile-actions">{profile.id===user.id?<><button className="outline-small" onClick={startEdit}><Settings size={15}/>プロフィールを編集</button><button className="outline-small logout-small" onClick={()=>void logout()}><LogOut size={14}/>ログアウト</button></>:<button className="primary-button" onClick={()=>void toggleFollow(profile.id)}>{followed?"フォロー中":"フォロー"}</button>}</div></div>{editing?<form className="edit-profile" onSubmit={saveProfile}><h2>プロフィールを編集</h2><label>ユーザー名<input required maxLength={80} value={profileForm.displayName} onChange={e=>setProfileForm({...profileForm,displayName:e.target.value})}/></label><label>自己紹介<textarea maxLength={300} rows={3} value={profileForm.bio} onChange={e=>setProfileForm({...profileForm,bio:e.target.value})} placeholder="あなたについて"/></label><label>リンク（https://）<input type="url" value={profileForm.website} onChange={e=>setProfileForm({...profileForm,website:e.target.value})} placeholder="https://example.com"/></label><label>プロフィール画像<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={e=>{const f=e.target.files?.[0];if(f)void uploadProfileMedia("avatarUrl",f)}}/></label><label>カバー画像<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={e=>{const f=e.target.files?.[0];if(f)void uploadProfileMedia("coverUrl",f)}}/></label><p className="form-help">画像は端末から直接アップロードされ、Tursoに保存されます（最大20MB）。</p><div className="edit-actions"><button type="button" className="outline-small" onClick={()=>setEditing(false)}>キャンセル</button><button className="primary-button" disabled={saving}>{saving?<LoaderCircle className="spin" size={16}/>:<Check size={16}/>}保存する</button></div></form>:<><h1 className="profile-name">{profile.display_name}</h1><p className="profile-handle">@{profile.id.replace(/^sennin:/,"").slice(0,24)}</p>{profile.bio&&<p className="profile-bio">{profile.bio}</p>}{profile.website&&<a className="profile-link" href={profile.website} target="_blank" rel="noreferrer"><LinkIcon size={15}/>{profile.website.replace(/^https?:\/\//,"")}</a>}<div className="profile-stats"><button type="button" onClick={()=>{}}><strong>{profilePosts.length}</strong><span>投稿</span></button><button type="button" onClick={()=>void openRelations("followers")}><strong>{followers}</strong><span>フォロワー</span></button><button type="button" onClick={()=>void openRelations("following")}><strong>{following}</strong><span>フォロー中</span></button></div><div className="profile-tabs"><span className="selected">投稿</span><span>メディア</span></div>{profilePosts.length?<div className="post-list">{profilePosts.map(p=><MediaPost key={p.id} post={p} user={user} onLike={like} onDelete={removePost} onProfile={id=>void openProfile(id)} liked={!!liked[p.id]}/>)}</div>:<div className="empty-state"><div className="empty-art"><ImagePlus size={26}/></div><h3>投稿はまだありません</h3><p>公開した投稿がここに表示されます。</p></div>}</>}</div></>}</section>}
- </section><aside className="right-rail"><div className="rail-card"><span className="eyebrow">SORA LINK</span><h3>あなたの世界を、<br/>もっと広く。</h3><p>日常の小さな瞬間をシェアして、好きな人や新しい発見とつながろう。</p><div className="rail-cloud"><LinkIcon size={38}/></div></div><div className="rail-footer">SoraLink · 安心してつながる場所<br/>利用規約　プライバシー</div></aside></main>
- <nav className="bottom-nav">{nav.map(([id,label,Icon])=><button key={id} className={tab===id?"active":""} onClick={()=>{setTab(id);if(id==="profile")void openProfile(user.id)}} aria-label={label}><span className="nav-icon">{id==="create"?<span className="create-plus"><Icon size={22}/></span>:<Icon size={21}/>}</span><span>{label}</span>{id==="notifications"&&unread>0&&<i className="nav-dot"/>}</button>)}</nav>
- {relationType&&<div className="story-overlay relation-overlay" onClick={()=>setRelationType(null)}><section className="relation-modal" onClick={e=>e.stopPropagation()}><header><div><h2>{relationType==="followers"?"フォロワー":"フォロー中"}</h2><span>{relationUsers.length}人</span></div><button onClick={()=>setRelationType(null)} aria-label="閉じる"><X/></button></header>{relationLoading?<div className="loading-state"><LoaderCircle className="spin"/>読み込み中…</div>:relationUsers.length?<div className="relation-list">{relationUsers.map(person=><div className="person-row" key={person.id}><button className="plain-avatar" onClick={()=>{setRelationType(null);void openProfile(person.id)}}><Avatar url={person.avatar_url} name={person.display_name}/></button><button className="person-info" onClick={()=>{setRelationType(null);void openProfile(person.id)}}><strong>{person.display_name}</strong><span>{person.bio||"SoraLinkを利用しています"}</span></button><button className="outline-small" onClick={()=>{setRelationType(null);void openProfile(person.id)}}>プロフィール</button></div>)}</div>:<div className="empty-state"><p>まだ{relationType==="followers"?"フォロワー":"フォロー中のユーザー"}はいません。</p></div>}</section></div>}
- {storyView&&<div className="story-overlay" onClick={()=>setStoryView(null)}><section className="story-modal" onClick={e=>e.stopPropagation()}><div className="story-progress"><i/></div><div className="story-modal-head"><Avatar url={storyView.avatar_url} name={storyView.display_name} size="small"/><strong>{storyView.display_name}</strong><span>{timeAgo(storyView.created_at)}</span><button onClick={()=>setStoryView(null)} aria-label="閉じる"><X/></button></div>{storyView.media_type==="image"?<img src={storyView.media_url} alt={storyView.caption||"ストーリー"}/>:<video src={storyView.media_url} controls autoPlay playsInline/>}{storyView.caption&&<p>{storyView.caption}</p>}<div className="story-actions"><button className={storyLiked?"story-liked":""} onClick={()=>setStoryLiked(v=>!v)}><Heart size={18} fill={storyLiked?"currentColor":"none"}/> {storyLiked?"いいね済み":"いいね"}</button><button onClick={()=>{const text=prompt("ストーリーへのコメント");if(text?.trim())tell("コメントを入力しました。コメントの保存にはサーバー側の対応が必要です。")}}><Users size={17}/> コメント</button><button onClick={async()=>{try{if(navigator.share)await navigator.share({title:"SoraLink ストーリー",url:location.href});else{await navigator.clipboard.writeText(location.href);tell("リンクをコピーしました。")}}catch{}}}><LinkIcon size={17}/> 共有</button></div></section></div>}
- </>}
- </div>
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { FormEvent } from "react";
+import LoginPage from "./login/LoginPage";
+import HomePage from "./home/HomePage";
+import SearchPage from "./search/SearchPage";
+import CreatePage from "./create/CreatePage";
+import NotificationsPage from "./notifications/NotificationsPage";
+import ProfilePage from "./profile/ProfilePage";
+import { blankProfile } from "./profile/profileForm";
+import type { ProfileForm, ProfileImageField } from "./profile/profileForm";
+import { PostDetailPage } from "./post/PostDetailPage";
+import { ImageDetailPage } from "./post/ImageDetailPage";
+import TopBar from "../components/layout/TopBar";
+import SideNav from "../components/layout/SideNav";
+import BottomNav from "../components/layout/BottomNav";
+import RightRail from "../components/layout/RightRail";
+import NoticeBanner from "../components/layout/NoticeBanner";
+import RelationsModal from "../components/RelationsModal";
+import type { PostCardHandlers } from "../components/PostCard";
+import type { NewPost } from "../components/CreatePost";
+import { api } from "../lib/api";
+import { optimizeImage } from "../lib/images";
+import { errorMessage } from "../lib/errors";
+import { parseRoute } from "../lib/route";
+import type { Route, Tab } from "../lib/route";
+import type { Notice, Person, Post, User } from "../types";
+
+// App shell for signed-in pages. Owns the shared state and the route; each page lives in its own file under pages/.
+export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [route, setRoute] = useState<Route>(() => parseRoute(location.pathname));
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [search, setSearch] = useState("");
+  const [people, setPeople] = useState<Person[]>([]);
+  const [notifications, setNotifications] = useState<Notice[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [liked, setLiked] = useState<Record<string, boolean>>({});
+
+  const [profileId, setProfileId] = useState<string | null>(null);
+  const [profile, setProfile] = useState<User | null>(null);
+  const [profilePosts, setProfilePosts] = useState<Post[]>([]);
+  const [followers, setFollowers] = useState(0);
+  const [following, setFollowing] = useState(0);
+  const [followed, setFollowed] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [profileForm, setProfileForm] = useState<ProfileForm>(blankProfile);
+  const [uploading, setUploading] = useState<ProfileImageField | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [relationType, setRelationType] = useState<"followers" | "following" | null>(null);
+  const [relationUsers, setRelationUsers] = useState<Person[]>([]);
+  const [relationLoading, setRelationLoading] = useState(false);
+
+  const noticeTimer = useRef<number | undefined>(undefined);
+  const canGoBack = useRef(false);
+  const visitedOtherTab = useRef(false);
+
+  const tell = useCallback((text: string) => {
+    setNotice(text);
+    window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(""), 3500);
+  }, []);
+
+  const go = useCallback((path: string, replace = false) => {
+    if (location.pathname !== path) {
+      if (replace) history.replaceState({ app: true }, "", path);
+      else { history.pushState({ app: true }, "", path); canGoBack.current = true; }
+    }
+    setRoute(parseRoute(path));
+  }, []);
+
+  const goBack = useCallback(() => {
+    if (canGoBack.current) history.back();
+    else go("/page/home");
+  }, [go]);
+
+  const load = useCallback(async (silent = false) => {
+    if (!silent) { setLoading(true); setError(""); }
+    try {
+      const feed = await api<{ posts: Post[] }>("/feed");
+      setPosts(feed.posts);
+      const me = await api<{ user: User }>("/me").catch(() => null);
+      setUser(me?.user ?? null);
+      if (me) {
+        const mine = await api<{ ids: string[] }>("/likes/mine").catch(() => ({ ids: [] as string[] }));
+        setLiked(Object.fromEntries(mine.ids.map(id => [id, true])));
+      } else {
+        setLiked({});
+      }
+    } catch (e) {
+      if (!silent) setError(errorMessage(e, "読み込みに失敗しました。"));
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, []);
+
+  const loadProfile = useCallback(async (id: string) => {
+    try {
+      const r = await api<{ user: User; posts: Post[]; followers: number; following: number; isFollowing: boolean }>(`/users/${encodeURIComponent(id)}`);
+      setProfile(r.user);
+      setProfilePosts(r.posts);
+      setFollowers(r.followers);
+      setFollowing(r.following);
+      setFollowed(r.isFollowing);
+      setEditing(false);
+    } catch (e) {
+      tell(errorMessage(e, "プロフィールを開けませんでした"));
+    }
+  }, [tell]);
+
+  // Initial load, and handle OAuth errors passed back in the query string.
+  useEffect(() => {
+    void load();
+    const authError = new URLSearchParams(location.search).get("auth_error");
+    if (authError) {
+      tell(authError);
+      history.replaceState({}, "", location.pathname);
+    }
+  }, [load, tell]);
+
+  // Browser back/forward.
+  useEffect(() => {
+    const onPop = () => setRoute(parseRoute(location.pathname));
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // Land on the home tab after login when the URL is not an app page.
+  useEffect(() => {
+    if (user && !location.pathname.startsWith("/page/")) go("/page/home", true);
+  }, [user?.id, go]);
+
+  // Keep the feed's counts fresh when coming back from a post or profile.
+  useEffect(() => {
+    if (route.tab !== "home") { visitedOtherTab.current = true; return; }
+    if (visitedOtherTab.current) void load(true);
+  }, [route, load]);
+
+  useEffect(() => {
+    if (route.tab !== "profile" || !user) return;
+    void loadProfile(profileId ?? user.id);
+  }, [route, profileId, user?.id, loadProfile]);
+
+  useEffect(() => {
+    if (route.tab !== "notifications" || !user) return;
+    api<{ notifications: Notice[] }>("/notifications")
+      .then(r => {
+        setNotifications(r.notifications);
+        setUnread(0);
+        return api("/notifications/read", { method: "POST" });
+      })
+      .catch(e => tell(errorMessage(e)));
+  }, [route, user?.id, tell]);
+
+  const openProfile = (id: string) => {
+    if (id !== profileId) setProfile(null);
+    setProfileId(id);
+    go("/page/profile");
+  };
+
+  // Tab navigation. The profile tab always opens the signed-in user's own profile.
+  const openTab = (tab: Tab) => {
+    if (tab === "profile") {
+      if (user) openProfile(user.id);
+      return;
+    }
+    go(`/page/${tab}`);
+  };
+
+  const openPost = (id: string) => go(`/page/post/${encodeURIComponent(id)}`);
+  const openImage = (id: string) => go(`/page/post/${encodeURIComponent(id)}/image`);
+
+  const createPost = async (input: NewPost) => {
+    await api("/posts", { method: "POST", body: JSON.stringify(input) });
+    await load(true);
+    tell("投稿を公開しました。");
+    go("/page/home");
+  };
+
+  const like = async (id: string) => {
+    if (!user) return tell("いいねするにはログインしてください。");
+    try {
+      const r = await api<{ liked: boolean }>(`/posts/${id}/like`, { method: "POST" });
+      setLiked(v => ({ ...v, [id]: r.liked }));
+      const bump = (list: Post[]) => list.map(p => p.id === id ? { ...p, likes_count: Math.max(0, Number(p.likes_count) + (r.liked ? 1 : -1)) } : p);
+      setPosts(bump);
+      setProfilePosts(bump);
+    } catch (e) {
+      tell(errorMessage(e, "いいねできませんでした"));
+    }
+  };
+
+  const removePost = async (id: string) => {
+    if (!confirm("この投稿を削除しますか？")) return;
+    try {
+      await api(`/posts/${id}`, { method: "DELETE" });
+      setPosts(v => v.filter(p => p.id !== id));
+      setProfilePosts(v => v.filter(p => p.id !== id));
+      tell("投稿を削除しました。");
+      if (route.tab === "post") goBack();
+    } catch (e) {
+      tell(errorMessage(e, "削除できませんでした"));
+    }
+  };
+
+  const runSearch = async (e?: FormEvent) => {
+    e?.preventDefault();
+    if (!user) return tell("ユーザー検索にはログインしてください。");
+    go("/page/search");
+    if (!search.trim()) return setPeople([]);
+    try {
+      const r = await api<{ users: Person[] }>(`/users/search?q=${encodeURIComponent(search.trim())}`);
+      setPeople(r.users);
+    } catch (e) {
+      tell(errorMessage(e, "検索できませんでした"));
+    }
+  };
+
+  const toggleFollow = async (id: string) => {
+    try {
+      const r = await api<{ following: boolean }>(`/users/${id}/follow`, { method: "POST" });
+      setFollowed(r.following);
+      setFollowers(n => Math.max(0, n + (r.following ? 1 : -1)));
+      tell(r.following ? "フォローしました。" : "フォローを解除しました。");
+    } catch (e) {
+      tell(errorMessage(e, "フォローできませんでした"));
+    }
+  };
+
+  const openRelations = async (type: "followers" | "following") => {
+    if (!profile) return;
+    setRelationType(type);
+    setRelationLoading(true);
+    try {
+      const r = await api<{ users: Person[] }>(`/users/${encodeURIComponent(profile.id)}/relations?type=${type}`);
+      setRelationUsers(r.users);
+    } catch (e) {
+      tell(errorMessage(e, "一覧を読み込めませんでした"));
+      setRelationType(null);
+    } finally {
+      setRelationLoading(false);
+    }
+  };
+
+  const uploadProfileImage = async (field: ProfileImageField, file: File) => {
+    setUploading(field);
+    try {
+      const body = new FormData();
+      body.append("file", await optimizeImage(file, field === "avatarUrl" ? 1024 : 1920));
+      const r = await api<{ url: string }>("/media/upload", { method: "POST", body });
+      setProfileForm(v => ({ ...v, [field]: r.url }));
+      tell("画像をアップロードしました。「保存する」で反映されます。");
+    } catch (e) {
+      tell(errorMessage(e, "画像をアップロードできませんでした"));
+    } finally {
+      setUploading(null);
+    }
+  };
+
+  const startEdit = () => {
+    if (!profile) return;
+    setProfileForm({ displayName: profile.display_name || "", bio: profile.bio || "", website: profile.website || "", avatarUrl: profile.avatar_url || "", coverUrl: profile.cover_url || "" });
+    setEditing(true);
+  };
+
+  const saveProfile = async (e: FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      const r = await api<{ user: User }>("/me/profile", { method: "PATCH", body: JSON.stringify(profileForm) });
+      setUser(r.user);
+      setProfile(r.user);
+      setEditing(false);
+      tell("プロフィールを保存しました。");
+    } catch (e) {
+      tell(errorMessage(e, "保存できませんでした"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await api("/auth/logout", { method: "POST" });
+      setUser(null);
+      go("/page/home", true);
+      tell("ログアウトしました。");
+    } catch (e) {
+      tell(errorMessage(e, "ログアウトできませんでした"));
+    }
+  };
+
+  const openNotification = (n: Notice) => {
+    if (n.kind === "like" && n.post_id) openPost(n.post_id);
+    else openProfile(n.actor_id);
+  };
+
+  const cardProps: PostCardHandlers = {
+    user,
+    onLike: (id: string) => void like(id),
+    onDelete: (id: string) => void removePost(id),
+    onProfile: openProfile,
+    onOpen: openPost,
+    onOpenImage: openImage,
+    onNotice: tell
+  };
+
+  const activeTab = route.tab;
+
+  if (!user) return <LoginPage />;
+
+  return (
+    <div className="app-shell">
+      <TopBar
+        user={user}
+        activeTab={activeTab}
+        unread={unread}
+        search={search}
+        onSearchChange={setSearch}
+        onSubmitSearch={runSearch}
+        onOpenTab={openTab}
+      />
+
+      <main className="main-layout">
+        <SideNav user={user} activeTab={activeTab} unread={unread} onOpenTab={openTab} />
+
+        <section className="main-column">
+          {notice && <NoticeBanner text={notice} onClose={() => setNotice("")} />}
+
+          {activeTab === "home" && (
+            <HomePage
+              posts={posts}
+              loading={loading}
+              error={error}
+              liked={liked}
+              cardProps={cardProps}
+              onReload={() => void load()}
+              onCreate={() => openTab("create")}
+            />
+          )}
+
+          {activeTab === "search" && (
+            <SearchPage
+              search={search}
+              people={people}
+              onSearchChange={setSearch}
+              onSubmit={runSearch}
+              onOpenProfile={openProfile}
+            />
+          )}
+
+          {activeTab === "create" && <CreatePage user={user} onCreate={createPost} />}
+
+          {activeTab === "notifications" && (
+            <NotificationsPage notifications={notifications} onOpenNotification={openNotification} />
+          )}
+
+          {activeTab === "profile" && (
+            <ProfilePage
+              user={user}
+              profile={profile}
+              profilePosts={profilePosts}
+              followers={followers}
+              following={following}
+              followed={followed}
+              editing={editing}
+              form={profileForm}
+              uploading={uploading}
+              saving={saving}
+              liked={liked}
+              cardProps={cardProps}
+              onStartEdit={startEdit}
+              onCancelEdit={() => setEditing(false)}
+              onFormChange={patch => setProfileForm(v => ({ ...v, ...patch }))}
+              onUploadImage={(field, file) => void uploadProfileImage(field, file)}
+              onSave={saveProfile}
+              onLogout={() => void logout()}
+              onToggleFollow={id => void toggleFollow(id)}
+              onOpenRelations={type => void openRelations(type)}
+            />
+          )}
+
+          {activeTab === "post" && route.postId && !route.image && (
+            <PostDetailPage
+              key={route.postId}
+              postId={route.postId}
+              user={user}
+              onBack={goBack}
+              onProfile={openProfile}
+              onOpenImage={openImage}
+              onDelete={id => void removePost(id)}
+              onNotice={tell}
+            />
+          )}
+        </section>
+
+        <RightRail />
+      </main>
+
+      <BottomNav activeTab={activeTab} unread={unread} onOpenTab={openTab} />
+
+      {activeTab === "post" && route.postId && route.image && (
+        <ImageDetailPage key={route.postId} postId={route.postId} onBack={goBack} />
+      )}
+
+      {relationType && (
+        <RelationsModal
+          type={relationType}
+          users={relationUsers}
+          loading={relationLoading}
+          onClose={() => setRelationType(null)}
+          onOpenProfile={openProfile}
+        />
+      )}
+    </div>
+  );
 }

@@ -1,35 +1,129 @@
-import { LoaderCircle, Clock3, Send, Upload, X } from "lucide-react";
+import { ImagePlus, LoaderCircle, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent } from "react";
 import { api } from "../lib/api";
-type Props = { onCreate: (input: { mediaType:"image"|"video"; mediaUrl:string; caption:string; kind:"post"|"story" }) => Promise<void> };
-async function optimizeImage(file: File): Promise<File> {
- if (!file.type.startsWith("image/") || file.type === "image/gif" || file.size < 700 * 1024) return file;
- try {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, 1920 / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return file;
-  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
-  const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/webp", 0.82));
-  if (!blob || blob.size >= file.size) return file;
-  return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".webp", { type: "image/webp", lastModified: Date.now() });
- } catch { return file; }
-}
-export default function CreatePost({onCreate}:Props){
- const [kind,setKind]=useState<"post"|"story">("post"),[file,setFile]=useState<File|null>(null),[caption,setCaption]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState(""); const inputRef=useRef<HTMLInputElement>(null);
- const mediaType = file?.type.startsWith("video/") ? "video" : "image";
- const previewUrl = useMemo(() => file ? URL.createObjectURL(file) : "", [file]);
- useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
- async function submit(e:React.FormEvent){e.preventDefault();setError("");if(!file){setError("投稿する画像または動画を選択してください。");return}setBusy(true);try{const body=new FormData();const uploadFile=await optimizeImage(file);body.append("file",uploadFile);const uploaded=await api<{url:string}>("/media/upload",{method:"POST",body});await onCreate({kind,mediaType,mediaUrl:uploaded.url,caption:caption.trim()});setFile(null);setCaption("");if(inputRef.current)inputRef.current.value="";}catch(err){setError(err instanceof Error?err.message:"投稿できませんでした。");}finally{setBusy(false)}}
- return <form className="composer card facebook-composer" onSubmit={submit}><div className="section-heading"><div><span className="eyebrow">SHARE A MOMENT</span><h2>投稿を作成</h2></div><span className="pill">{kind==="story"?"24時間で消えます":"プロフィールに残ります"}</span></div>
- <div className="media-toggle"><button type="button" className={kind==="post"?"selected":""} onClick={()=>setKind("post")}><Send size={16}/>投稿</button><button type="button" className={kind==="story"?"selected":""} onClick={()=>setKind("story")}><Clock3 size={16}/>ストーリー</button></div>
- <button type="button" className={`upload-dropzone ${file?"has-file":""}`} onClick={()=>inputRef.current?.click()}><Upload size={24}/><strong>{file?file.name:"写真・動画を追加"}</strong><span>{file ? `${(file.size/1024/1024).toFixed(1)} MB · 選択し直す` : "端末から直接アップロード（最大20MB・大きな画像は自動圧縮）"}</span></button>
- <input ref={inputRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" onChange={e=>setFile(e.target.files?.[0]||null)}/>
- {file&&<div className="upload-preview">{mediaType==="image"?<img src={previewUrl} alt="投稿プレビュー"/>:<video src={previewUrl} controls/>}<button type="button" aria-label="ファイルを削除" onClick={()=>{setFile(null);if(inputRef.current)inputRef.current.value=""}}><X size={16}/></button></div>}
- <label className="field-label" htmlFor="caption">キャプション</label><textarea id="caption" value={caption} maxLength={500} onChange={e=>setCaption(e.target.value)} placeholder="今の気持ちをシェアしよう…" rows={3}/>{error&&<p className="error-text">{error}</p>}
- <div className="composer-footer"><span>{caption.length}/500</span><button className="primary-button" disabled={busy||!file}>{busy?<LoaderCircle className="spin" size={17}/>:null}{kind==="story"?"ストーリーを公開":"投稿する"}</button></div></form>
+import { optimizeImage } from "../lib/images";
+import type { User } from "../types";
+import Avatar from "./Avatar";
+
+export type NewPost = { mediaType?: "image" | "video"; mediaUrl?: string; caption: string };
+type Props = { user: User; onCreate: (input: NewPost) => Promise<void> };
+
+const MAX_LENGTH = 500;
+const RING_RADIUS = 9;
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+
+export default function CreatePost({ user, onCreate }: Props) {
+  const [text, setText] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const previewUrl = useMemo(() => (file ? URL.createObjectURL(file) : ""), [file]);
+  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
+
+  const mediaType: "image" | "video" = file?.type.startsWith("video/") ? "video" : "image";
+  const trimmed = text.trim();
+  const remaining = MAX_LENGTH - text.length;
+  const canPost = !busy && (trimmed.length > 0 || file !== null) && remaining >= 0;
+
+  const clearFile = () => {
+    setFile(null);
+    if (inputRef.current) inputRef.current.value = "";
+  };
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!canPost) return;
+    setBusy(true);
+    setError("");
+    try {
+      let mediaUrl: string | undefined;
+      if (file) {
+        const body = new FormData();
+        body.append("file", await optimizeImage(file));
+        const uploaded = await api<{ url: string }>("/media/upload", { method: "POST", body });
+        mediaUrl = uploaded.url;
+      }
+      await onCreate({ mediaType: file ? mediaType : undefined, mediaUrl, caption: trimmed });
+      setText("");
+      clearFile();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "投稿できませんでした。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const ratio = Math.min(1, Math.max(0, text.length / MAX_LENGTH));
+
+  return (
+    <form className="x-composer" onSubmit={submit}>
+      <div className="x-composer-row">
+        <Avatar url={user.avatar_url} name={user.display_name} />
+        <div className="x-composer-main">
+          <textarea
+            className="x-composer-text"
+            value={text}
+            onChange={e => setText(e.target.value)}
+            placeholder="いま、何してる？"
+            rows={4}
+            maxLength={MAX_LENGTH + 50}
+            aria-label="投稿内容"
+            autoFocus
+          />
+
+          {previewUrl && (
+            <div className="x-composer-media">
+              {mediaType === "image" ? <img src={previewUrl} alt="添付した画像のプレビュー" /> : <video src={previewUrl} controls playsInline />}
+              <button type="button" className="x-media-remove" onClick={clearFile} aria-label="添付を削除"><X size={16} /></button>
+            </div>
+          )}
+
+          {error && <p className="x-composer-error" role="alert">{error}</p>}
+
+          <div className="x-composer-bar">
+            <button
+              type="button"
+              className="x-tool-button"
+              onClick={() => inputRef.current?.click()}
+              aria-label="写真または動画を追加"
+              title="写真・動画を追加"
+              disabled={busy}
+            >
+              <ImagePlus size={20} />
+            </button>
+            <input
+              ref={inputRef}
+              className="visually-hidden"
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime"
+              onChange={e => setFile(e.target.files?.[0] ?? null)}
+            />
+
+            <div className="x-composer-end">
+              <svg className="x-ring" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r={RING_RADIUS} className="track" />
+                <circle
+                  cx="12"
+                  cy="12"
+                  r={RING_RADIUS}
+                  className={`bar ${remaining <= 20 ? "warn" : ""}`}
+                  strokeDasharray={RING_CIRCUMFERENCE}
+                  strokeDashoffset={RING_CIRCUMFERENCE * (1 - ratio)}
+                  transform="rotate(-90 12 12)"
+                />
+              </svg>
+              {remaining <= 20 && <span className={`x-count ${remaining < 0 ? "over" : ""}`}>{remaining}</span>}
+              <button className="x-post-button" disabled={!canPost}>
+                {busy && <LoaderCircle className="spin" size={16} />}
+                {busy ? "投稿中" : "投稿する"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </form>
+  );
 }
