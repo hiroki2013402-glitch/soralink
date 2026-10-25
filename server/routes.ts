@@ -8,6 +8,7 @@ export const api = Router();
 const mediaUrl = z.string().url().max(2048).refine((s) => { try { return new URL(s).protocol === "https:" && !["localhost", "127.0.0.1", "0.0.0.0"].includes(new URL(s).hostname) && !new URL(s).hostname.endsWith(".local"); } catch { return false; } }, "HTTPSのメディアURLを入力してください。");
 const postSchema = z.object({ mediaType: z.enum(["image", "video"]), mediaUrl, caption: z.string().max(500).optional().default(""), kind: z.enum(["post", "story"]).optional().default("post") });
 const profileSchema = z.object({ displayName: z.string().trim().min(1).max(80), bio: z.string().max(300).default(""), website: z.string().max(2048).optional().default(""), avatarUrl: z.union([z.literal(""), mediaUrl]).optional().default(""), coverUrl: z.union([z.literal(""), mediaUrl]).optional().default("") });
+const routeId = (value: string | string[] | undefined): string | undefined => typeof value === "string" ? value : undefined;
 
 api.get("/me", requireAuth, async (req, res) => {
   const r = await db.execute({sql:"SELECT id, display_name, email, avatar_url, cover_url, bio, website, created_at FROM users WHERE id = ?", args:[req.user!.id]});
@@ -48,13 +49,69 @@ api.get("/users/search", requireAuth, async(req,res)=>{
   const r=await db.execute({sql:"SELECT id,display_name,avatar_url,bio FROM users WHERE display_name LIKE ? AND id<>? LIMIT 30",args:[`%${q}%`,req.user!.id]});
   res.json({users:r.rows});
 });
-api.get("/users/:id", requireAuth, async(req,res)=>{ try { const u=await db.execute({sql:"SELECT id,display_name,avatar_url,cover_url,bio,website,created_at FROM users WHERE id=?",args:[req.params.id]}); if(!u.rows.length)return res.status(404).json({error:"ユーザーが見つかりません。"});
- const [posts,followers,following]=await Promise.all([db.execute({sql:"SELECT p.id,p.user_id,p.media_type,p.media_url,p.caption,p.created_at,u.display_name,u.avatar_url,(SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) likes_count FROM posts p JOIN users u ON u.id=p.user_id WHERE p.user_id=? ORDER BY p.created_at DESC LIMIT 80",args:[req.params.id]}),db.execute({sql:"SELECT COUNT(*) n FROM follows WHERE followed_id=?",args:[req.params.id]}),db.execute({sql:"SELECT COUNT(*) n FROM follows WHERE follower_id=?",args:[req.params.id]})]);
- const followed=await db.execute({sql:"SELECT 1 FROM follows WHERE follower_id=? AND followed_id=?",args:[req.user!.id,req.params.id]}); const isFollowing=followed.rows.length>0;
- res.json({user:u.rows[0],posts:posts.rows,followers:Number(followers.rows[0]?.n||0),following:Number(following.rows[0]?.n||0),isFollowing});
- } catch {res.status(500).json({error:"プロフィールを読み込めませんでした。"});}});
-api.post("/posts/:id/like",requireAuth,async(req,res)=>{try{const p=await db.execute({sql:"SELECT user_id FROM posts WHERE id=?",args:[req.params.id]});if(!p.rows.length)return res.status(404).json({error:"投稿が見つかりません。"});const owner=String(p.rows[0].user_id);const ex=await db.execute({sql:"SELECT 1 FROM likes WHERE user_id=? AND post_id=?",args:[req.user!.id,req.params.id]});if(ex.rows.length){await db.execute({sql:"DELETE FROM likes WHERE user_id=? AND post_id=?",args:[req.user!.id,req.params.id]});res.json({liked:false});}else{await db.execute({sql:"INSERT INTO likes(user_id,post_id,created_at) VALUES(?,?,?)",args:[req.user!.id,req.params.id,new Date().toISOString()]});if(owner!==req.user!.id)await db.execute({sql:"INSERT INTO notifications(id,user_id,actor_id,kind,post_id,created_at) VALUES(?,?,?,?,?,?)",args:[crypto.randomUUID(),owner,req.user!.id,"like",req.params.id,new Date().toISOString()]});res.json({liked:true});}}catch{res.status(500).json({error:"いいねを処理できませんでした。"});}});
-api.post("/users/:id/follow",requireAuth,async(req,res)=>{if(req.params.id===req.user!.id)return res.status(400).json({error:"自分自身はフォローできません。"});try{const t=await db.execute({sql:"SELECT id FROM users WHERE id=?",args:[req.params.id]});if(!t.rows.length)return res.status(404).json({error:"ユーザーが見つかりません。"});const ex=await db.execute({sql:"SELECT 1 FROM follows WHERE follower_id=? AND followed_id=?",args:[req.user!.id,req.params.id]});if(ex.rows.length){await db.execute({sql:"DELETE FROM follows WHERE follower_id=? AND followed_id=?",args:[req.user!.id,req.params.id]});return res.json({following:false});}await db.execute({sql:"INSERT INTO follows(follower_id,followed_id,created_at) VALUES(?,?,?)",args:[req.user!.id,req.params.id,new Date().toISOString()]});await db.execute({sql:"INSERT INTO notifications(id,user_id,actor_id,kind,created_at) VALUES(?,?,?,?,?)",args:[crypto.randomUUID(),req.params.id,req.user!.id,"follow",new Date().toISOString()]});res.json({following:true});}catch{res.status(500).json({error:"フォローを処理できませんでした。"});}});
+api.get("/users/:id", requireAuth, async(req,res)=>{
+  const id = routeId(req.params.id);
+  if (!id) return res.status(400).json({error:"ユーザーIDが不正です。"});
+  try {
+    const u=await db.execute({sql:"SELECT id,display_name,avatar_url,cover_url,bio,website,created_at FROM users WHERE id=?",args:[id]});
+    if(!u.rows.length)return res.status(404).json({error:"ユーザーが見つかりません。"});
+    const [posts,followers,following]=await Promise.all([
+      db.execute({sql:"SELECT p.id,p.user_id,p.media_type,p.media_url,p.caption,p.created_at,u.display_name,u.avatar_url,(SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) likes_count FROM posts p JOIN users u ON u.id=p.user_id WHERE p.user_id=? ORDER BY p.created_at DESC LIMIT 80",args:[id]}),
+      db.execute({sql:"SELECT COUNT(*) n FROM follows WHERE followed_id=?",args:[id]}),
+      db.execute({sql:"SELECT COUNT(*) n FROM follows WHERE follower_id=?",args:[id]})
+    ]);
+    const followed=await db.execute({sql:"SELECT 1 FROM follows WHERE follower_id=? AND followed_id=?",args:[req.user!.id,id]});
+    const isFollowing=followed.rows.length>0;
+    res.json({user:u.rows[0],posts:posts.rows,followers:Number(followers.rows[0]?.n||0),following:Number(following.rows[0]?.n||0),isFollowing});
+  } catch {
+    res.status(500).json({error:"プロフィールを読み込めませんでした。"});
+  }
+});
+api.post("/posts/:id/like",requireAuth,async(req,res)=>{
+  const id = routeId(req.params.id);
+  if (!id) return res.status(400).json({error:"投稿IDが不正です。"});
+  try {
+    const p=await db.execute({sql:"SELECT user_id FROM posts WHERE id=?",args:[id]});
+    if(!p.rows.length)return res.status(404).json({error:"投稿が見つかりません。"});
+    const owner=String(p.rows[0].user_id);
+    const ex=await db.execute({sql:"SELECT 1 FROM likes WHERE user_id=? AND post_id=?",args:[req.user!.id,id]});
+    if(ex.rows.length){
+      await db.execute({sql:"DELETE FROM likes WHERE user_id=? AND post_id=?",args:[req.user!.id,id]});
+      res.json({liked:false});
+    }else{
+      await db.execute({sql:"INSERT INTO likes(user_id,post_id,created_at) VALUES(?,?,?)",args:[req.user!.id,id,new Date().toISOString()]});
+      if(owner!==req.user!.id)await db.execute({sql:"INSERT INTO notifications(id,user_id,actor_id,kind,post_id,created_at) VALUES(?,?,?,?,?,?)",args:[crypto.randomUUID(),owner,req.user!.id,"like",id,new Date().toISOString()]});
+      res.json({liked:true});
+    }
+  }catch{
+    res.status(500).json({error:"いいねを処理できませんでした。"});
+  }
+});
+api.post("/users/:id/follow",requireAuth,async(req,res)=>{
+  const id = routeId(req.params.id);
+  if (!id) return res.status(400).json({error:"ユーザーIDが不正です。"});
+  if(id===req.user!.id)return res.status(400).json({error:"自分自身はフォローできません。"});
+  try{
+    const t=await db.execute({sql:"SELECT id FROM users WHERE id=?",args:[id]});
+    if(!t.rows.length)return res.status(404).json({error:"ユーザーが見つかりません。"});
+    const ex=await db.execute({sql:"SELECT 1 FROM follows WHERE follower_id=? AND followed_id=?",args:[req.user!.id,id]});
+    if(ex.rows.length){
+      await db.execute({sql:"DELETE FROM follows WHERE follower_id=? AND followed_id=?",args:[req.user!.id,id]});
+      return res.json({following:false});
+    }
+    await db.execute({sql:"INSERT INTO follows(follower_id,followed_id,created_at) VALUES(?,?,?)",args:[req.user!.id,id,new Date().toISOString()]});
+    await db.execute({sql:"INSERT INTO notifications(id,user_id,actor_id,kind,created_at) VALUES(?,?,?,?,?)",args:[crypto.randomUUID(),id,req.user!.id,"follow",new Date().toISOString()]});
+    res.json({following:true});
+  }catch{
+    res.status(500).json({error:"フォローを処理できませんでした。"});
+  }
+});
 api.get("/notifications",requireAuth,async(req,res)=>{try{const r=await db.execute({sql:`SELECT n.id,n.kind,n.post_id,n.created_at,n.read_at,u.id actor_id,u.display_name,u.avatar_url FROM notifications n JOIN users u ON u.id=n.actor_id WHERE n.user_id=? ORDER BY n.created_at DESC LIMIT 100`,args:[req.user!.id]});res.json({notifications:r.rows});}catch{res.status(500).json({error:"通知を読み込めませんでした。"});}});
 api.post("/notifications/read",requireAuth,async(req,res)=>{await db.execute({sql:"UPDATE notifications SET read_at=? WHERE user_id=? AND read_at IS NULL",args:[new Date().toISOString(),req.user!.id]});res.json({ok:true});});
-api.delete("/posts/:id",requireAuth,async(req,res)=>{const r=await db.execute({sql:"DELETE FROM posts WHERE id=? AND user_id=?",args:[req.params.id,req.user!.id]});if(!r.rowsAffected)return res.status(404).json({error:"投稿が見つからないか、削除権限がありません。"});res.json({ok:true});});
+api.delete("/posts/:id",requireAuth,async(req,res)=>{
+  const id = routeId(req.params.id);
+  if (!id) return res.status(400).json({error:"投稿IDが不正です。"});
+  const r=await db.execute({sql:"DELETE FROM posts WHERE id=? AND user_id=?",args:[id,req.user!.id]});
+  if(!r.rowsAffected)return res.status(404).json({error:"投稿が見つからないか、削除権限がありません。"});
+  res.json({ok:true});
+});
