@@ -16,6 +16,9 @@ import BottomNav from "../components/layout/BottomNav";
 import RightRail from "../components/layout/RightRail";
 import NoticeBanner from "../components/layout/NoticeBanner";
 import RelationsModal from "../components/RelationsModal";
+import MessagesPage from "./messages/MessagesPage";
+import ConversationPage from "./messages/ConversationPage";
+import { onDmEvent, startDmRealtime, stopDmRealtime } from "../lib/dmRealtime";
 import type { PostCardHandlers } from "../components/PostCard";
 import type { NewPost } from "../components/CreatePost";
 import { api } from "../lib/api";
@@ -23,7 +26,8 @@ import { optimizeImage } from "../lib/images";
 import { errorMessage } from "../lib/errors";
 import { parseRoute } from "../lib/route";
 import type { Route, Tab } from "../lib/route";
-import type { Notice, Person, Post, User } from "../types";
+import type { Notice, Person, Post, SearchResults, User } from "../types";
+import CloseFriendsModal from "../components/CloseFriendsModal";
 
 // App shell for signed-in pages. Owns the shared state and the route; each page lives in its own file under pages/.
 export default function App() {
@@ -34,9 +38,12 @@ export default function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [search, setSearch] = useState("");
-  const [people, setPeople] = useState<Person[]>([]);
+  const [results, setResults] = useState<SearchResults | null>(null);
+  const [closeFriendsOpen, setCloseFriendsOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notice[]>([]);
   const [unread, setUnread] = useState(0);
+  const [dmUnread, setDmUnread] = useState(0);
+  const [dmCounts, setDmCounts] = useState<Record<string, number>>({});
   const [liked, setLiked] = useState<Record<string, boolean>>({});
 
   const [profileId, setProfileId] = useState<string | null>(null);
@@ -110,6 +117,42 @@ export default function App() {
     }
   }, [tell]);
 
+  // Unread counts for the nav badges. Polled every 30s, refreshed on return to the tab, and on every DM event.
+  const refreshCounts = useCallback(async () => {
+    const [n, d] = await Promise.all([
+      api<{ count: number }>("/notifications/unread-count").catch(() => null),
+      api<{ total: number; counts: Record<string, number> }>("/dm/unread").catch(() => null)
+    ]);
+    if (n) setUnread(n.count);
+    if (d) {
+      setDmUnread(d.total);
+      setDmCounts(d.counts);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    void refreshCounts();
+    const timer = window.setInterval(() => void refreshCounts(), 30000);
+    const onVisible = () => { if (document.visibilityState === "visible") void refreshCounts(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [user?.id, refreshCounts]);
+
+  // Supabase Realtime connection for direct messages.
+  useEffect(() => {
+    if (!user) return;
+    void startDmRealtime(user.id);
+    const off = onDmEvent(() => { void refreshCounts(); });
+    return () => {
+      off();
+      stopDmRealtime();
+    };
+  }, [user?.id, refreshCounts]);
+
   // Initial load, and handle OAuth errors passed back in the query string.
   useEffect(() => {
     void load();
@@ -171,6 +214,8 @@ export default function App() {
 
   const openPost = (id: string) => go(`/page/post/${encodeURIComponent(id)}`);
   const openImage = (id: string) => go(`/page/post/${encodeURIComponent(id)}/image`);
+  const openConversation = useCallback((id: string) => go(`/page/messages/${encodeURIComponent(id)}`), [go]);
+  const goMessages = useCallback(() => go("/page/messages"), [go]);
 
   const createPost = async (input: NewPost) => {
     await api("/posts", { method: "POST", body: JSON.stringify(input) });
@@ -187,6 +232,7 @@ export default function App() {
       const bump = (list: Post[]) => list.map(p => p.id === id ? { ...p, likes_count: Math.max(0, Number(p.likes_count) + (r.liked ? 1 : -1)) } : p);
       setPosts(bump);
       setProfilePosts(bump);
+      setResults(r => r ? { ...r, posts: bump(r.posts) } : r);
     } catch (e) {
       tell(errorMessage(e, "いいねできませんでした"));
     }
@@ -198,6 +244,7 @@ export default function App() {
       await api(`/posts/${id}`, { method: "DELETE" });
       setPosts(v => v.filter(p => p.id !== id));
       setProfilePosts(v => v.filter(p => p.id !== id));
+      setResults(r => r ? { ...r, posts: r.posts.filter(p => p.id !== id) } : r);
       tell("投稿を削除しました。");
       if (route.tab === "post") goBack();
     } catch (e) {
@@ -207,14 +254,14 @@ export default function App() {
 
   const runSearch = async (e?: FormEvent) => {
     e?.preventDefault();
-    if (!user) return tell("ユーザー検索にはログインしてください。");
+    if (!user) return tell("検索にはログインしてください。");
     go("/page/search");
-    if (!search.trim()) return setPeople([]);
+    const q = search.trim();
+    if (!q) return setResults(null);
     try {
-      const r = await api<{ users: Person[] }>(`/users/search?q=${encodeURIComponent(search.trim())}`);
-      setPeople(r.users);
-    } catch (e) {
-      tell(errorMessage(e, "検索できませんでした"));
+      setResults(await api<SearchResults>(`/search?q=${encodeURIComponent(q)}`));
+    } catch (err) {
+      tell(errorMessage(err, "検索できませんでした"));
     }
   };
 
@@ -317,14 +364,17 @@ export default function App() {
         user={user}
         activeTab={activeTab}
         unread={unread}
+        dmUnread={dmUnread}
         search={search}
         onSearchChange={setSearch}
         onSubmitSearch={runSearch}
         onOpenTab={openTab}
+        onOpenPost={openPost}
+        onOpenProfile={openProfile}
       />
 
       <main className="main-layout">
-        <SideNav user={user} activeTab={activeTab} unread={unread} onOpenTab={openTab} />
+        <SideNav user={user} activeTab={activeTab} unread={unread} dmUnread={dmUnread} onOpenTab={openTab} />
 
         <section className="main-column">
           {notice && <NoticeBanner text={notice} onClose={() => setNotice("")} />}
@@ -344,7 +394,9 @@ export default function App() {
           {activeTab === "search" && (
             <SearchPage
               search={search}
-              people={people}
+              results={results}
+              liked={liked}
+              cardProps={cardProps}
               onSearchChange={setSearch}
               onSubmit={runSearch}
               onOpenProfile={openProfile}
@@ -355,6 +407,21 @@ export default function App() {
 
           {activeTab === "notifications" && (
             <NotificationsPage notifications={notifications} onOpenNotification={openNotification} />
+          )}
+
+          {activeTab === "messages" && (
+            route.conversationId ? (
+              <ConversationPage
+                key={route.conversationId}
+                user={user}
+                conversationId={route.conversationId}
+                onBack={goMessages}
+                onCountsChanged={refreshCounts}
+                onNotice={tell}
+              />
+            ) : (
+              <MessagesPage user={user} counts={dmCounts} onOpenConversation={openConversation} onNotice={tell} />
+            )
           )}
 
           {activeTab === "profile" && (
@@ -379,6 +446,7 @@ export default function App() {
               onLogout={() => void logout()}
               onToggleFollow={id => void toggleFollow(id)}
               onOpenRelations={type => void openRelations(type)}
+              onOpenCloseFriends={() => setCloseFriendsOpen(true)}
             />
           )}
 
@@ -396,14 +464,16 @@ export default function App() {
           )}
         </section>
 
-        <RightRail />
+        <RightRail user={user} onOpenPost={openPost} onOpenProfile={openProfile} onNotice={tell} />
       </main>
 
-      <BottomNav activeTab={activeTab} unread={unread} onOpenTab={openTab} />
+      <BottomNav activeTab={activeTab} unread={unread} dmUnread={dmUnread} onOpenTab={openTab} />
 
       {activeTab === "post" && route.postId && route.image && (
         <ImageDetailPage key={route.postId} postId={route.postId} onBack={goBack} />
       )}
+
+      {closeFriendsOpen && <CloseFriendsModal onClose={() => setCloseFriendsOpen(false)} onNotice={tell} />}
 
       {relationType && (
         <RelationsModal

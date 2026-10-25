@@ -1,4 +1,4 @@
-import { ImagePlus, Link as LinkIcon, LogOut, Settings, LoaderCircle } from "lucide-react";
+import { ImagePlus, Link as LinkIcon, LogOut, Settings, LoaderCircle, Star } from "lucide-react";
 import type { FormEvent } from "react";
 import Avatar from "../../components/Avatar";
 import PostCard from "../../components/PostCard";
@@ -29,6 +29,7 @@ type Props = {
   onLogout: () => void;
   onToggleFollow: (id: string) => void;
   onOpenRelations: (type: "followers" | "following") => void;
+  onOpenCloseFriends: () => void;
 };
 
 // Profile tab: header (cover, avatar, follow/edit), stats, and the user's posts.
@@ -54,6 +55,7 @@ export default function ProfilePage(props: Props) {
           <div className="profile-actions">
             {profile.id === user.id ? (
               <>
+                <button className="outline-small" onClick={props.onOpenCloseFriends}><Star size={15} />親しい友達</button>
                 <button className="outline-small" onClick={props.onStartEdit}><Settings size={15} />プロフィールを編集</button>
                 <button className="outline-small logout-small" onClick={props.onLogout}><LogOut size={14} />ログアウト</button>
               </>

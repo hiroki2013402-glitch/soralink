@@ -11,12 +11,14 @@ if (!url || !authToken) {
 export const db = createClient({ url, authToken });
 
 // media_type / media_url are nullable so a post can be text-only (like X).
+// visibility: 'public' | 'followers' | 'close_friends'.
 const postsTableSql = (name: string, ifNotExists = true) => `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}${name} (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id),
       media_type TEXT CHECK(media_type IS NULL OR media_type IN ('image','video')),
       media_url TEXT,
       caption TEXT NOT NULL DEFAULT '',
+      visibility TEXT NOT NULL DEFAULT 'public' CHECK(visibility IN ('public','followers','close_friends')),
       created_at TEXT NOT NULL
     )`;
 
@@ -65,6 +67,14 @@ export async function initializeDatabase() {
       PRIMARY KEY(follower_id, followed_id),
       CHECK(follower_id <> followed_id)
     )`,
+    // Close friends: chosen by the owner from among their followers (owner_id = the person who chose).
+    `CREATE TABLE IF NOT EXISTS close_friends (
+      owner_id TEXT NOT NULL REFERENCES users(id),
+      friend_id TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(owner_id, friend_id),
+      CHECK(owner_id <> friend_id)
+    )`,
     `CREATE TABLE IF NOT EXISTS sessions (
       id_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id),
@@ -81,13 +91,26 @@ export async function initializeDatabase() {
     `CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC)`
   ], "write");
 
+  await db.batch([
+    "CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id)",
+    "CREATE INDEX IF NOT EXISTS idx_follows_followed_created ON follows(followed_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, read_at)"
+  ], "write");
+
   await migratePostsToOptionalMedia();
 
-  const columns = await db.execute("PRAGMA table_info(users)");
-  const names = new Set(columns.rows.map((r) => String(r.name)));
-  if (!names.has("cover_url")) await db.execute("ALTER TABLE users ADD COLUMN cover_url TEXT");
-  if (!names.has("bio")) await db.execute("ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT ''");
-  if (!names.has("website")) await db.execute("ALTER TABLE users ADD COLUMN website TEXT");
+  const userColumns = await db.execute("PRAGMA table_info(users)");
+  const userNames = new Set(userColumns.rows.map((r) => String(r.name)));
+  if (!userNames.has("cover_url")) await db.execute("ALTER TABLE users ADD COLUMN cover_url TEXT");
+  if (!userNames.has("bio")) await db.execute("ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT ''");
+  if (!userNames.has("website")) await db.execute("ALTER TABLE users ADD COLUMN website TEXT");
+
+  // Databases created before post visibility existed get the column here; older rows become public.
+  const postColumns = await db.execute("PRAGMA table_info(posts)");
+  if (!postColumns.rows.some((r) => r.name === "visibility")) {
+    await db.execute("ALTER TABLE posts ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public' CHECK(visibility IN ('public','followers','close_friends'))");
+  }
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_posts_visibility_created ON posts(visibility, created_at DESC)");
 }
 
 // Older databases created posts.media_type / media_url as NOT NULL. SQLite cannot drop NOT NULL in

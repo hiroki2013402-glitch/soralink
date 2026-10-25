@@ -105,3 +105,28 @@ Stories were removed from the app. The `stories` table is no longer created or r
 ## UI direction
 
 The feed uses an X-style layout: white cards with a left avatar column, a modern composer with a character ring, and a compact top bar with the SoraLink logo. Navigation is responsive, with a bottom bar on phones. SoraLink retains its own name and logo rather than copying Facebook branding or assets.
+
+## Direct messages (Supabase)
+
+Direct messages use Supabase for their database and Realtime; everything else (users, posts, notifications) stays in Turso.
+
+- Supports 1:1 chats and group chats (up to 20 people). Messages are images only (JPG, PNG, WebP, GIF, up to 10 MB).
+- Images are stored in the private `dm-images` Storage bucket and served through `/api/dm/messages/:id/image` as short-lived signed URLs.
+- Browsers receive new messages through Supabase Realtime. Row Level Security limits each browser to its own conversations, using a short-lived JWT that the server issues.
+- The nav badges show the number of unread notifications and unread messages (polled every 30 seconds, and updated live for messages).
+
+Setup:
+
+1. In the Supabase SQL Editor, run `supabase/schema.sql`.
+2. Add `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_JWT_SECRET` to the environment (Project Settings → API). The service role key must stay on the server only.
+3. Run `npm install` before building, since `@supabase/supabase-js` was added.
+
+Realtime tokens are signed with the project's legacy JWT secret (HS256). If the project uses asymmetric JWT signing keys, update `mintRealtimeToken` in `server/supabase.ts` to match.
+
+## Post visibility, close friends, and search
+
+- Each post has a visibility: **公開** (everyone), **フォロワーのみ** (followers of the author), or **親しい友達** (close friends chosen by the author).
+- Close friends are picked from the author's followers in the 親しい友達 settings (profile page). Unfollowing removes that person from the close friends list.
+- Visibility is enforced on the server everywhere: feed, post detail, comments, likes, profiles, recommendations, search, and post media (`/api/media/:id`). Restricted media is served with `Cache-Control: private`.
+- Search (`/api/search`) covers people and post text. The search box shows suggestions as you type (`/api/search/suggest`).
+- Existing posts are public after the migration. The `visibility` column is added automatically on startup.

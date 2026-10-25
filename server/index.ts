@@ -10,6 +10,7 @@ import { config } from "./config.js";
 import { initializeDatabase } from "./db.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { api } from "./routes.js";
+import { dm } from "./dm.js";
 
 const app = express();
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -27,7 +28,7 @@ app.use(helmet({
       formAction: ["'self'", "https://script.google.com"],
       imgSrc: ["'self'", "data:", "https:"],
       mediaSrc: ["'self'", "https:"],
-      connectSrc: ["'self'", "https:"],
+      connectSrc: ["'self'", "https:", "wss:"],
       scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       upgradeInsecureRequests: config.nodeEnv === "production" ? [] : null
@@ -68,6 +69,7 @@ app.use(cookieParser());
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, name: "SoraLink", version: "2.0.0" }));
 registerOAuthRoutes(app);
+app.use("/api", dm);
 app.use("/api", api);
 
 const clientBuildDir = path.join(projectRoot, "dist");

@@ -9,6 +9,8 @@ One screen = one folder = one `.tsx` file. Find a screen by its URL:
 | `/page/search` | `search/SearchPage.tsx` |
 | `/page/create` | `create/CreatePage.tsx` |
 | `/page/notifications` | `notifications/NotificationsPage.tsx` |
+| `/page/messages` | `messages/MessagesPage.tsx` (conversation list and new chat) |
+| `/page/messages/:id` | `messages/ConversationPage.tsx` (image messages, realtime) |
 | `/page/profile` | `profile/ProfilePage.tsx` (edit form: `profile/ProfileEditForm.tsx`) |
 | `/page/post/:id` | `post/PostDetailPage.tsx` |
 | `/page/post/:id/image` | `post/ImageDetailPage.tsx` |

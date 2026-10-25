@@ -1,6 +1,7 @@
 import { Heart, MessageCircle, Share2, Trash2 } from "lucide-react";
 import type { Post, User } from "../types";
 import Avatar from "./Avatar";
+import VisibilityBadge from "./VisibilityBadge";
 import { timeAgo } from "../lib/format";
 
 type Props = {
@@ -45,6 +46,7 @@ export default function PostCard({ post, user, liked, onLike, onDelete, onProfil
         <header className="x-post-head">
           <button className="x-post-author" onClick={() => onProfile(post.user_id)}>{post.display_name}</button>
           <time dateTime={post.created_at}>· {timeAgo(post.created_at)}</time>
+          <VisibilityBadge visibility={post.visibility} />
           {mine && (
             <button className="x-icon-button x-post-delete" onClick={() => onDelete(post.id)} aria-label="投稿を削除" title="投稿を削除">
               <Trash2 size={16} />

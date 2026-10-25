@@ -1,12 +1,13 @@
-import { ImagePlus, LoaderCircle, X } from "lucide-react";
+import { Globe, ImagePlus, LoaderCircle, Star, Users, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { api } from "../lib/api";
 import { optimizeImage } from "../lib/images";
-import type { User } from "../types";
+import type { User, Visibility } from "../types";
+import { VISIBILITY_OPTIONS } from "../lib/visibility";
 import Avatar from "./Avatar";
 
-export type NewPost = { mediaType?: "image" | "video"; mediaUrl?: string; caption: string };
+export type NewPost = { mediaType?: "image" | "video"; mediaUrl?: string; caption: string; visibility: Visibility };
 type Props = { user: User; onCreate: (input: NewPost) => Promise<void> };
 
 const MAX_LENGTH = 500;
@@ -18,6 +19,7 @@ export default function CreatePost({ user, onCreate }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [visibility, setVisibility] = useState<Visibility>("public");
   const inputRef = useRef<HTMLInputElement>(null);
 
   const previewUrl = useMemo(() => (file ? URL.createObjectURL(file) : ""), [file]);
@@ -46,7 +48,7 @@ export default function CreatePost({ user, onCreate }: Props) {
         const uploaded = await api<{ url: string }>("/media/upload", { method: "POST", body });
         mediaUrl = uploaded.url;
       }
-      await onCreate({ mediaType: file ? mediaType : undefined, mediaUrl, caption: trimmed });
+      await onCreate({ mediaType: file ? mediaType : undefined, mediaUrl, caption: trimmed, visibility });
       setText("");
       clearFile();
     } catch (err) {
@@ -82,6 +84,26 @@ export default function CreatePost({ user, onCreate }: Props) {
           )}
 
           {error && <p className="x-composer-error" role="alert">{error}</p>}
+
+          <div className="vis-picker" role="radiogroup" aria-label="公開範囲">
+            <div className="vis-options">
+              {VISIBILITY_OPTIONS.map(option => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={visibility === option.value}
+                  className={`vis-option ${visibility === option.value ? "on" : ""}`}
+                  onClick={() => setVisibility(option.value)}
+                  disabled={busy}
+                >
+                  {option.value === "public" ? <Globe size={14} /> : option.value === "followers" ? <Users size={14} /> : <Star size={14} />}
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <small>{VISIBILITY_OPTIONS.find(o => o.value === visibility)?.hint}</small>
+          </div>
 
           <div className="x-composer-bar">
             <button
