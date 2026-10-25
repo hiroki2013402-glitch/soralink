@@ -45,6 +45,20 @@ export async function initializeDatabase() {
     )`,
     `CREATE TABLE IF NOT EXISTS media_chunks (media_id TEXT NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE, chunk_index INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(media_id, chunk_index))`,
     `CREATE INDEX IF NOT EXISTS idx_media_user ON media_assets(user_id, created_at DESC)`,
+    // Videos are stored in Cloudflare R2; this table holds their keys and upload state.
+    `CREATE TABLE IF NOT EXISTS media_videos (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      video_key TEXT NOT NULL,
+      poster_key TEXT,
+      mime_type TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      storage TEXT NOT NULL DEFAULT 'private' CHECK(storage IN ('public','private')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','ready')),
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_media_videos_user ON media_videos(user_id, created_at DESC)`,
     postsTableSql("posts"),
     `CREATE TABLE IF NOT EXISTS likes (
       user_id TEXT NOT NULL REFERENCES users(id),

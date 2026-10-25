@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import { api } from "./api";
 
-export type DmRow = { id: string; conversation_id: string; sender_id: string; created_at: string };
+export type DmRow = { id: string; conversation_id: string; sender_id: string; created_at: string; kind?: string | null; body?: string | null };
 export type DmEvent =
   | { type: "message"; conversationId: string; message: DmRow }
   | { type: "membership"; conversationId: string };

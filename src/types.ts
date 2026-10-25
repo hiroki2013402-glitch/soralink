@@ -24,5 +24,8 @@ export type SuggestPost = { id:string; caption:string; media_type:"image"|"video
 export type Suggestions = { users: Person[]; posts: SuggestPost[] };
 
 export type DmMember = { id:string; display_name:string; avatar_url:string|null };
-export type DmConversation = { id:string; is_group:boolean; title:string|null; last_message_at:string; members:DmMember[] };
-export type DmMessage = { id:string; sender_id:string; created_at:string; image_url:string };
+// last_preview is the newest message's text (or a photo placeholder); last_sender_id tells the list who wrote it.
+export type DmConversation = { id:string; is_group:boolean; title:string|null; last_message_at:string; last_preview:string|null; last_sender_id:string|null; members:DmMember[] };
+export type DmMessage = { id:string; sender_id:string; created_at:string; kind:"text"|"image"; body:string|null; image_url:string|null };
+// A note is a short status shown for 24 hours above the author's avatar in the message list.
+export type DmNote = { user_id:string; body:string; created_at:string; expires_at:string; display_name:string; avatar_url:string|null };

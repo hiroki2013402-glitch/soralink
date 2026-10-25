@@ -5,14 +5,17 @@ import { api } from "../lib/api";
 import { optimizeImage } from "../lib/images";
 import type { User, Visibility } from "../types";
 import { VISIBILITY_OPTIONS } from "../lib/visibility";
+import { uploadVideo, VIDEO_MAX_BYTES, VIDEO_TYPES } from "../lib/video";
 import Avatar from "./Avatar";
+import VideoPlayer from "./VideoPlayer";
 
-export type NewPost = { mediaType?: "image" | "video"; mediaUrl?: string; caption: string; visibility: Visibility };
+export type NewPost = { mediaType?: "image" | "video"; mediaUrl?: string; videoId?: string; caption: string; visibility: Visibility };
 type Props = { user: User; onCreate: (input: NewPost) => Promise<void> };
 
 const MAX_LENGTH = 500;
 const RING_RADIUS = 9;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+const ACCEPT = ["image/jpeg", "image/png", "image/webp", "image/gif", ...VIDEO_TYPES].join(",");
 
 export default function CreatePost({ user, onCreate }: Props) {
   const [text, setText] = useState("");
@@ -20,6 +23,8 @@ export default function CreatePost({ user, onCreate }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [visibility, setVisibility] = useState<Visibility>("public");
+  // Upload progress for videos, 0..1. null when nothing is uploading.
+  const [progress, setProgress] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const previewUrl = useMemo(() => (file ? URL.createObjectURL(file) : ""), [file]);
@@ -32,7 +37,24 @@ export default function CreatePost({ user, onCreate }: Props) {
 
   const clearFile = () => {
     setFile(null);
+    setError("");
     if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const pick = (picked: File | undefined) => {
+    if (!picked) return setFile(null);
+    if (picked.type.startsWith("video/")) {
+      if (!VIDEO_TYPES.includes(picked.type)) {
+        if (inputRef.current) inputRef.current.value = "";
+        return setError("MP4、WebM、MOV形式の動画を選択してください。");
+      }
+      if (picked.size > VIDEO_MAX_BYTES) {
+        if (inputRef.current) inputRef.current.value = "";
+        return setError("動画は200MB以下にしてください。");
+      }
+    }
+    setError("");
+    setFile(picked);
   };
 
   async function submit(event: FormEvent) {
@@ -41,20 +63,27 @@ export default function CreatePost({ user, onCreate }: Props) {
     setBusy(true);
     setError("");
     try {
-      let mediaUrl: string | undefined;
-      if (file) {
-        const body = new FormData();
-        body.append("file", await optimizeImage(file));
-        const uploaded = await api<{ url: string }>("/media/upload", { method: "POST", body });
-        mediaUrl = uploaded.url;
+      if (file && mediaType === "video") {
+        setProgress(0);
+        const videoId = await uploadVideo(file, visibility, setProgress);
+        await onCreate({ mediaType: "video", videoId, caption: trimmed, visibility });
+      } else {
+        let mediaUrl: string | undefined;
+        if (file) {
+          const body = new FormData();
+          body.append("file", await optimizeImage(file));
+          const uploaded = await api<{ url: string }>("/media/upload", { method: "POST", body });
+          mediaUrl = uploaded.url;
+        }
+        await onCreate({ mediaType: file ? "image" : undefined, mediaUrl, caption: trimmed, visibility });
       }
-      await onCreate({ mediaType: file ? mediaType : undefined, mediaUrl, caption: trimmed, visibility });
       setText("");
       clearFile();
     } catch (err) {
       setError(err instanceof Error ? err.message : "投稿できませんでした。");
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -78,8 +107,17 @@ export default function CreatePost({ user, onCreate }: Props) {
 
           {previewUrl && (
             <div className="x-composer-media">
-              {mediaType === "image" ? <img src={previewUrl} alt="添付した画像のプレビュー" /> : <video src={previewUrl} controls playsInline />}
-              <button type="button" className="x-media-remove" onClick={clearFile} aria-label="添付を削除"><X size={16} /></button>
+              {mediaType === "image"
+                ? <img src={previewUrl} alt="添付した画像のプレビュー" />
+                : <VideoPlayer key={previewUrl} src={previewUrl} label="添付した動画のプレビュー" />}
+              <button type="button" className="x-media-remove" onClick={clearFile} aria-label="添付を削除" disabled={busy}><X size={16} /></button>
+            </div>
+          )}
+
+          {progress !== null && (
+            <div className="x-upload-progress" role="status">
+              <div className="x-upload-bar"><span style={{ width: `${Math.round(progress * 100)}%` }} /></div>
+              <small>{progress < 1 ? `動画をアップロード中… ${Math.round(progress * 100)}%` : "動画を確認しています…"}</small>
             </div>
           )}
 
@@ -120,8 +158,8 @@ export default function CreatePost({ user, onCreate }: Props) {
               ref={inputRef}
               className="visually-hidden"
               type="file"
-              accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime"
-              onChange={e => setFile(e.target.files?.[0] ?? null)}
+              accept={ACCEPT}
+              onChange={e => pick(e.target.files?.[0])}
             />
 
             <div className="x-composer-end">

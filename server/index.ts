@@ -11,6 +11,8 @@ import { initializeDatabase } from "./db.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { api } from "./routes.js";
 import { dm } from "./dm.js";
+import { videos } from "./videos.js";
+import { initializeVideoDatabase } from "./videoDb.js";
 
 const app = express();
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -64,12 +66,16 @@ function rateLimit(limit: number, windowMs: number) {
   };
 }
 app.use("/api/auth", rateLimit(30, 60_000));
-app.use("/api", (req, res, next) => req.method === "GET" ? rateLimit(180, 60_000)(req, res, next) : rateLimit(60, 60_000)(req, res, next));
+app.use("/api", (req, res, next) => {
+  if (req.method === "PUT" && /^\/media\/video\/[0-9a-f-]{36}\/chunk\/\d+$/i.test(req.path)) return rateLimit(1200, 60_000)(req, res, next);
+  return req.method === "GET" ? rateLimit(180, 60_000)(req, res, next) : rateLimit(60, 60_000)(req, res, next);
+});
 app.use(cookieParser());
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, name: "SoraLink", version: "2.0.0" }));
 registerOAuthRoutes(app);
 app.use("/api", dm);
+app.use("/api", videos);
 app.use("/api", api);
 
 const clientBuildDir = path.join(projectRoot, "dist");
@@ -83,6 +89,7 @@ if (existsSync(clientIndex)) {
 }
 
 await initializeDatabase();
+await initializeVideoDatabase();
 app.listen(config.port, "0.0.0.0", () => {
   console.log(`SoraLink API listening on ${config.port}`);
 });

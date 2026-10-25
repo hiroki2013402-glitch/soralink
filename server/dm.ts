@@ -7,13 +7,16 @@ import { requireAuth } from "./auth.js";
 import { db } from "./db.js";
 import { mintRealtimeToken, sb, supabaseAnonKey, supabaseUrl } from "./supabase.js";
 
-// Direct messages. Conversations, members and messages live in Supabase; the user directory stays in Turso.
+// Direct messages. Conversations, members, messages and notes live in Supabase; the user directory stays in Turso.
 export const dm = Router();
 
 const BUCKET = "dm-images";
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_TEXT_LENGTH = 1000;
 const MAX_CONVERSATION_MEMBERS = 20;
 const PAGE_SIZE = 50;
+const NOTE_MAX_LENGTH = 60;
+const NOTE_TTL_MS = 24 * 60 * 60 * 1000;
 const IMAGE_EXTENSIONS = new Map([
   ["image/jpeg", "jpg"],
   ["image/png", "png"],
@@ -27,6 +30,7 @@ const upload = multer({
   fileFilter: (_req, file, cb) => cb(null, IMAGE_EXTENSIONS.has(file.mimetype))
 });
 
+// Accepts an optional image (multipart "file"). Plain JSON requests pass straight through as text messages.
 const uploadImage = (req: Request, res: Response, next: () => void) => {
   upload.single("file")(req, res, (err: unknown) => {
     if (!err) return next();
@@ -42,6 +46,12 @@ const createSchema = z.object({
   userIds: z.array(z.string().min(1).max(200)).min(1).max(MAX_CONVERSATION_MEMBERS - 1),
   title: z.string().trim().max(60).optional().default("")
 });
+const textSchema = z.object({
+  body: z.string().trim().min(1, "メッセージを入力してください。").max(MAX_TEXT_LENGTH, "メッセージは1000文字以内で入力してください。")
+});
+const noteSchema = z.object({
+  body: z.string().trim().min(1, "ノートを入力してください。").max(NOTE_MAX_LENGTH, `ノートは${NOTE_MAX_LENGTH}文字以内で入力してください。`)
+});
 
 type Person = { id: string; display_name: string; avatar_url: string | null };
 
@@ -52,6 +62,7 @@ const param = (req: Request, name: string) => {
 const isUuid = (value: string) => z.string().uuid().safeParse(value).success;
 const imageUrlFor = (messageId: string) => `/api/dm/messages/${messageId}/image`;
 const unknownPerson = (id: string): Person => ({ id, display_name: "退会したユーザー", avatar_url: null });
+const previewOf = (text: string) => text.replace(/\s+/g, " ").slice(0, 80);
 
 // Checks the file's leading bytes so a renamed non-image cannot be stored as an image.
 function hasImageSignature(buffer: Buffer, mime: string) {
@@ -146,7 +157,7 @@ dm.get("/dm/conversations", requireAuth, async (req, res) => {
     if (!ids.length) return res.json({ conversations: [] });
 
     const [convs, members] = await Promise.all([
-      sb.from("dm_conversations").select("id, is_group, title, last_message_at").in("id", ids).order("last_message_at", { ascending: false }),
+      sb.from("dm_conversations").select("id, is_group, title, last_message_at, last_preview, last_sender_id").in("id", ids).order("last_message_at", { ascending: false }),
       sb.from("dm_members").select("conversation_id, user_id").in("conversation_id", ids)
     ]);
     if (convs.error) throw convs.error;
@@ -161,11 +172,15 @@ dm.get("/dm/conversations", requireAuth, async (req, res) => {
     }
 
     res.json({
-      conversations: (convs.data ?? []).map((c: { id: string; is_group: boolean; title: string | null; last_message_at: string }) => ({
+      conversations: (convs.data ?? []).map((c: {
+        id: string; is_group: boolean; title: string | null; last_message_at: string; last_preview: string | null; last_sender_id: string | null;
+      }) => ({
         id: c.id,
         is_group: c.is_group,
         title: c.title,
         last_message_at: c.last_message_at,
+        last_preview: c.last_preview,
+        last_sender_id: c.last_sender_id,
         members: (membersByConversation.get(c.id) ?? []).map(uid => people.get(uid) ?? unknownPerson(uid))
       }))
     });
@@ -217,7 +232,7 @@ dm.get("/dm/conversations/:id", requireAuth, async (req, res) => {
     if (!(await isMember(id, req.user!.id))) return res.status(404).json({ error: "会話が見つかりません。" });
 
     const before = typeof req.query.before === "string" && !Number.isNaN(Date.parse(req.query.before)) ? req.query.before : "";
-    let messageQuery = sb.from("dm_messages").select("id, sender_id, created_at").eq("conversation_id", id);
+    let messageQuery = sb.from("dm_messages").select("id, sender_id, created_at, kind, body").eq("conversation_id", id);
     if (before) messageQuery = messageQuery.lt("created_at", before);
 
     const [conversation, members, messages] = await Promise.all([
@@ -231,7 +246,7 @@ dm.get("/dm/conversations/:id", requireAuth, async (req, res) => {
 
     const memberIds: string[] = (members.data ?? []).map((m: { user_id: string }) => m.user_id);
     const people = await peopleById(memberIds);
-    const rows: { id: string; sender_id: string; created_at: string }[] = messages.data ?? [];
+    const rows: { id: string; sender_id: string; created_at: string; kind: string | null; body: string | null }[] = messages.data ?? [];
 
     res.json({
       conversation: {
@@ -240,12 +255,7 @@ dm.get("/dm/conversations/:id", requireAuth, async (req, res) => {
         title: conversation.data.title,
         members: memberIds.map(uid => people.get(uid) ?? unknownPerson(uid))
       },
-      messages: rows.slice(0, PAGE_SIZE).reverse().map(m => ({
-        id: m.id,
-        sender_id: m.sender_id,
-        created_at: m.created_at,
-        image_url: imageUrlFor(m.id)
-      })),
+      messages: rows.slice(0, PAGE_SIZE).reverse().map(m => toMessage(m)),
       hasMore: rows.length > PAGE_SIZE
     });
   } catch {
@@ -253,39 +263,56 @@ dm.get("/dm/conversations/:id", requireAuth, async (req, res) => {
   }
 });
 
-// Image-only messages. The bytes go to a private Supabase Storage bucket; the row stores the path.
+// Legacy rows have no kind and are images; text rows carry their body.
+function toMessage(m: { id: string; sender_id: string; created_at: string; kind: string | null; body: string | null }) {
+  const isText = m.kind === "text";
+  return {
+    id: m.id,
+    sender_id: m.sender_id,
+    created_at: m.created_at,
+    kind: isText ? "text" : "image",
+    body: isText ? m.body : null,
+    image_url: isText ? null : imageUrlFor(m.id)
+  };
+}
+
+// Text (JSON { body }) or one image (multipart "file"). Images go to a private Supabase Storage bucket.
 dm.post("/dm/conversations/:id/messages", requireAuth, uploadImage, async (req, res) => {
   const me = req.user!.id;
   const conversationId = param(req, "id");
   const file = req.file;
   try {
     if (!(await isMember(conversationId, me))) return res.status(404).json({ error: "会話が見つかりません。" });
-    if (!file) return res.status(400).json({ error: "画像を選択してください。" });
-    if (!hasImageSignature(file.buffer, file.mimetype)) return res.status(400).json({ error: "画像の内容と形式が一致しません。" });
 
     const messageId = crypto.randomUUID();
-    const path = `${conversationId}/${messageId}.${IMAGE_EXTENSIONS.get(file.mimetype)}`;
-    const uploaded = await sb.storage.from(BUCKET).upload(path, new Uint8Array(file.buffer), { contentType: file.mimetype, upsert: false });
-    if (uploaded.error) throw uploaded.error;
-
     const now = new Date().toISOString();
-    const inserted = await sb.from("dm_messages").insert({
-      id: messageId,
-      conversation_id: conversationId,
-      sender_id: me,
-      image_path: path,
-      mime_type: file.mimetype,
-      created_at: now
-    });
+    let row: Record<string, unknown>;
+    let preview: string;
+
+    if (file) {
+      if (!hasImageSignature(file.buffer, file.mimetype)) return res.status(400).json({ error: "画像の内容と形式が一致しません。" });
+      const path = `${conversationId}/${messageId}.${IMAGE_EXTENSIONS.get(file.mimetype)}`;
+      const uploaded = await sb.storage.from(BUCKET).upload(path, new Uint8Array(file.buffer), { contentType: file.mimetype, upsert: false });
+      if (uploaded.error) throw uploaded.error;
+      row = { id: messageId, conversation_id: conversationId, sender_id: me, kind: "image", image_path: path, mime_type: file.mimetype, created_at: now };
+      preview = "写真を送信しました";
+    } else {
+      const parsed = textSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "メッセージを入力してください。" });
+      row = { id: messageId, conversation_id: conversationId, sender_id: me, kind: "text", body: parsed.data.body, created_at: now };
+      preview = previewOf(parsed.data.body);
+    }
+
+    const inserted = await sb.from("dm_messages").insert(row);
     if (inserted.error) {
-      await sb.storage.from(BUCKET).remove([path]);
+      if (file) await sb.storage.from(BUCKET).remove([String(row.image_path)]);
       throw inserted.error;
     }
-    await sb.from("dm_conversations").update({ last_message_at: now }).eq("id", conversationId);
+    await sb.from("dm_conversations").update({ last_message_at: now, last_preview: preview, last_sender_id: me }).eq("id", conversationId);
 
-    res.status(201).json({ message: { id: messageId, sender_id: me, created_at: now, image_url: imageUrlFor(messageId) } });
+    res.status(201).json({ message: toMessage({ id: messageId, sender_id: me, created_at: now, kind: String(row.kind), body: (row.body as string) ?? null }) });
   } catch {
-    res.status(500).json({ error: "画像を送信できませんでした。" });
+    res.status(500).json({ error: file ? "画像を送信できませんでした。" : "メッセージを送信できませんでした。" });
   }
 });
 
@@ -296,7 +323,7 @@ dm.get("/dm/messages/:id/image", requireAuth, async (req, res) => {
     if (!isUuid(messageId)) return res.status(404).end();
     const found = await sb.from("dm_messages").select("conversation_id, image_path").eq("id", messageId).maybeSingle();
     if (found.error) throw found.error;
-    if (!found.data || !(await isMember(String(found.data.conversation_id), req.user!.id))) return res.status(404).end();
+    if (!found.data?.image_path || !(await isMember(String(found.data.conversation_id), req.user!.id))) return res.status(404).end();
 
     const signed = await sb.storage.from(BUCKET).createSignedUrl(String(found.data.image_path), 300);
     if (signed.error || !signed.data) throw signed.error ?? new Error("署名付きURLを作成できませんでした。");
@@ -338,5 +365,98 @@ dm.post("/dm/conversations/:id/leave", requireAuth, async (req, res) => {
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: "退出できませんでした。" });
+  }
+});
+
+// ---- Notes -------------------------------------------------------------------
+// A note is a short status (60 characters) shown above the avatar in the message list for 24 hours.
+// Visible to the people the author follows and to their followers. Stored in Supabase (dm_notes).
+
+type NoteRow = { user_id: string; body: string; created_at: string; expires_at: string };
+
+// Users whose notes the viewer may see: people they follow and people who follow them.
+async function noteAudience(me: string): Promise<string[]> {
+  const r = await db.execute({
+    sql: "SELECT followed_id AS id FROM follows WHERE follower_id=? UNION SELECT follower_id AS id FROM follows WHERE followed_id=?",
+    args: [me, me]
+  });
+  return [...new Set(r.rows.map(row => String(row.id)).filter(id => id !== me))];
+}
+
+async function activeNotes(userIds: string[]): Promise<NoteRow[]> {
+  const now = new Date().toISOString();
+  const found: NoteRow[] = [];
+  // Chunked so the IN list stays a reasonable size for large follow graphs.
+  for (let i = 0; i < userIds.length; i += 200) {
+    const chunk = userIds.slice(i, i + 200);
+    const r = await sb.from("dm_notes").select("user_id, body, created_at, expires_at")
+      .in("user_id", chunk).gt("expires_at", now);
+    if (r.error) throw r.error;
+    found.push(...((r.data ?? []) as NoteRow[]));
+  }
+  return found.sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
+function noteView(note: NoteRow, person: Person | undefined) {
+  return {
+    user_id: note.user_id,
+    body: note.body,
+    created_at: note.created_at,
+    expires_at: note.expires_at,
+    display_name: person?.display_name ?? "退会したユーザー",
+    avatar_url: person?.avatar_url ?? null
+  };
+}
+
+// The viewer's own note (if any) and the notes of people in their audience.
+dm.get("/dm/notes", requireAuth, async (req, res) => {
+  const me = req.user!.id;
+  try {
+    // Expired notes are cleared here so the table does not grow without bound.
+    await sb.from("dm_notes").delete().lt("expires_at", new Date().toISOString());
+
+    const audience = await noteAudience(me);
+    const notes = await activeNotes([me, ...audience]);
+    const people = await peopleById(notes.map(n => n.user_id));
+    if (req.user) people.set(me, { id: me, display_name: req.user.display_name, avatar_url: req.user.avatar_url });
+
+    const mine = notes.find(n => n.user_id === me);
+    res.json({
+      mine: mine ? noteView(mine, people.get(me)) : null,
+      notes: notes.filter(n => n.user_id !== me).map(n => noteView(n, people.get(n.user_id)))
+    });
+  } catch {
+    res.status(500).json({ error: "ノートを読み込めませんでした。" });
+  }
+});
+
+// Creates or replaces the viewer's note. Each new note lasts 24 hours.
+dm.put("/dm/notes/me", requireAuth, async (req, res) => {
+  const parsed = noteSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "ノートを入力してください。" });
+  const me = req.user!.id;
+  const now = new Date();
+  const note = {
+    user_id: me,
+    body: parsed.data.body,
+    created_at: now.toISOString(),
+    expires_at: new Date(now.getTime() + NOTE_TTL_MS).toISOString()
+  };
+  try {
+    const saved = await sb.from("dm_notes").upsert(note, { onConflict: "user_id" });
+    if (saved.error) throw saved.error;
+    res.json({ mine: noteView(note, { id: me, display_name: req.user!.display_name, avatar_url: req.user!.avatar_url }) });
+  } catch {
+    res.status(500).json({ error: "ノートを保存できませんでした。" });
+  }
+});
+
+dm.delete("/dm/notes/me", requireAuth, async (req, res) => {
+  try {
+    const removed = await sb.from("dm_notes").delete().eq("user_id", req.user!.id);
+    if (removed.error) throw removed.error;
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: "ノートを削除できませんでした。" });
   }
 });

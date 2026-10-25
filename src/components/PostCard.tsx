@@ -2,6 +2,8 @@ import { Heart, MessageCircle, Share2, Trash2 } from "lucide-react";
 import type { Post, User } from "../types";
 import Avatar from "./Avatar";
 import VisibilityBadge from "./VisibilityBadge";
+import VideoPlayer from "./VideoPlayer";
+import { posterFor } from "../lib/video";
 import { timeAgo } from "../lib/format";
 
 type Props = {
@@ -64,8 +66,8 @@ export default function PostCard({ post, user, liked, onLike, onDelete, onProfil
           </button>
         )}
         {post.media_url && post.media_type === "video" && (
-          <div className="x-post-media">
-            <video src={post.media_url} controls playsInline preload="metadata" />
+          <div className="x-post-media x-post-video">
+            <VideoPlayer src={post.media_url} poster={posterFor(post.media_url)} label="投稿の動画" />
           </div>
         )}
 

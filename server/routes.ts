@@ -5,12 +5,14 @@ import multer from "multer";
 import { db } from "./db.js";
 import { requireAuth } from "./auth.js";
 import { canSeePost, resolveViewer, VISIBILITIES, VISIBLE_TO_SQL, visibleArgs } from "./visibility.js";
+import { deleteVideoForPost, mediaUrlForVideo } from "./videos.js";
 
 export const api = Router();
 const routeId = (value: string | string[] | undefined): string | undefined => typeof value === "string" ? value : undefined;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_FILE_BYTES, files: 1 }, fileFilter: (_req, file, cb) => { const ok = ["image/jpeg","image/png","image/webp","image/gif","video/mp4","video/webm","video/quicktime"].includes(file.mimetype); if (ok) cb(null, true); else cb(new Error("JPG、PNG、WebP、GIF、MP4、WebM形式に対応しています。")); } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_FILE_BYTES, files: 1 }, fileFilter: (_req, file, cb) => { const ok = ["image/jpeg","image/png","image/webp","image/gif"].includes(file.mimetype); if (ok) cb(null, true); else cb(new Error("JPG、PNG、WebP、GIF形式の画像を選択してください。")); } });
+// Images only. Videos go to Cloudflare R2 through /api/media/video/* (see videos.ts).
 api.post("/media/upload", requireAuth, (req, res, next) => upload.single("file")(req, res, (err) => {
   if (!err) return next();
   if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ error: "ファイルは20MB以下にしてください。" });
@@ -18,8 +20,8 @@ api.post("/media/upload", requireAuth, (req, res, next) => upload.single("file")
 }), async (req, res) => {
   const file = req.file; if (!file) return res.status(400).json({ error: "画像または動画を選択してください。" });
   const b = file.buffer; const starts = (...bytes:number[]) => bytes.every((v,i)=>b[i]===v);
-  const signatureOk = file.mimetype === "image/jpeg" ? starts(0xff,0xd8,0xff) : file.mimetype === "image/png" ? starts(0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a) : file.mimetype === "image/gif" ? (b.subarray(0,6).toString("ascii")==="GIF87a"||b.subarray(0,6).toString("ascii")==="GIF89a") : file.mimetype === "image/webp" ? (b.subarray(0,4).toString("ascii")==="RIFF"&&b.subarray(8,12).toString("ascii")==="WEBP") : file.mimetype === "video/mp4" || file.mimetype === "video/quicktime" ? b.subarray(4,8).toString("ascii")==="ftyp" : file.mimetype === "video/webm" ? starts(0x1a,0x45,0xdf,0xa3) : false;
-  if (!signatureOk) return res.status(400).json({ error: "ファイルの内容と形式が一致しません。対応形式の画像・動画を選択してください。" });
+  const signatureOk = file.mimetype === "image/jpeg" ? starts(0xff,0xd8,0xff) : file.mimetype === "image/png" ? starts(0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a) : file.mimetype === "image/gif" ? (b.subarray(0,6).toString("ascii")==="GIF87a"||b.subarray(0,6).toString("ascii")==="GIF89a") : file.mimetype === "image/webp" ? (b.subarray(0,4).toString("ascii")==="RIFF"&&b.subarray(8,12).toString("ascii")==="WEBP") : false;
+  if (!signatureOk) return res.status(400).json({ error: "ファイルの内容と形式が一致しません。対応形式の画像を選択してください。" });
   if (file.size > MAX_FILE_BYTES) return res.status(413).json({ error: "ファイルは20MB以下にしてください。" });
   try { const id = crypto.randomUUID(); await db.execute({ sql: "INSERT INTO media_assets(id,user_id,mime_type,file_name,size_bytes,created_at) VALUES(?,?,?,?,?,?)", args: [id, req.user!.id, file.mimetype, file.originalname.slice(0, 180), file.size, new Date().toISOString()] }); const chunkSize = 256 * 1024; const statements = []; for (let offset = 0, index = 0; offset < file.buffer.length; offset += chunkSize, index++) statements.push({ sql: "INSERT INTO media_chunks(media_id,chunk_index,data) VALUES(?,?,?)", args: [id, index, new Uint8Array(file.buffer.subarray(offset, Math.min(offset + chunkSize, file.buffer.length)))] }); if (statements.length) await db.batch(statements, "write"); res.status(201).json({ id, url: `/api/media/${id}`, mimeType: file.mimetype, size: file.size }); } catch { res.status(500).json({ error: "メディアをTursoに保存できませんでした。データベースの容量・プランを確認してください。" }); }
 });
@@ -51,14 +53,19 @@ const mediaUrl = z.string().url().max(2048).refine((s) => { try { return new URL
 const storedMedia = z.string().regex(/^\/api\/media\/[0-9a-f-]{36}$/i, "アップロード済みのメディアを指定してください。");
 const visibilitySchema = z.enum(VISIBILITIES, { errorMap: () => ({ message: "公開範囲の指定が不正です。" }) });
 // A post needs text, media, or both. Media is optional so text-only posts work.
+// Images reference a Turso upload (mediaUrl); videos reference an R2 upload (videoId). The server sets the video URL.
 const postSchema = z.object({
   mediaType: z.enum(["image", "video"]).nullish(),
   mediaUrl: storedMedia.nullish(),
+  videoId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "アップロード済みの動画を指定してください。").nullish(),
   caption: z.string().trim().max(500).default(""),
   visibility: visibilitySchema.default("public")
 }).superRefine((value, ctx) => {
-  if (Boolean(value.mediaUrl) !== Boolean(value.mediaType)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "メディアの指定が不正です。" });
-  if (!value.mediaUrl && !value.caption) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "テキストか画像・動画を入力してください。" });
+  const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  if (value.mediaType === "image" && (!value.mediaUrl || value.videoId)) issue("メディアの指定が不正です。");
+  if (value.mediaType === "video" && (!value.videoId || value.mediaUrl)) issue("メディアの指定が不正です。");
+  if (!value.mediaType && (value.mediaUrl || value.videoId)) issue("メディアの指定が不正です。");
+  if (!value.mediaType && !value.caption) issue("テキストか画像・動画を入力してください。");
 });
 const commentSchema = z.object({ body: z.string().trim().min(1, "コメントを入力してください。").max(500, "コメントは500文字以内で入力してください。") });
 const profileSchema = z.object({ displayName: z.string().trim().min(1).max(80), bio: z.string().max(300).default(""), website: z.string().max(2048).optional().default(""), avatarUrl: z.union([z.literal(""), mediaUrl, storedMedia]).optional().default(""), coverUrl: z.union([z.literal(""), mediaUrl, storedMedia]).optional().default("") });
@@ -102,9 +109,17 @@ api.get("/likes/mine", requireAuth, async(req,res)=>{ try { const r=await db.exe
 
 api.post("/posts", requireAuth, async (req,res) => {
   const p=postSchema.safeParse(req.body); if(!p.success) return res.status(400).json({error:p.error.issues[0]?.message||"入力を確認してください。"});
-  if (p.data.mediaUrl) { const owned=await db.execute({sql:"SELECT id FROM media_assets WHERE id=? AND user_id=?",args:[p.data.mediaUrl.slice("/api/media/".length),req.user!.id]}); if(!owned.rows.length)return res.status(403).json({error:"自分がアップロードしたメディアのみ投稿できます。"}); }
+  let mediaUrl: string | null = p.data.mediaUrl ?? null;
+  if (p.data.mediaType === "image" && mediaUrl) { const owned=await db.execute({sql:"SELECT id FROM media_assets WHERE id=? AND user_id=?",args:[mediaUrl.slice("/api/media/".length),req.user!.id]}); if(!owned.rows.length)return res.status(403).json({error:"自分がアップロードしたメディアのみ投稿できます。"}); }
+  if (p.data.mediaType === "video") {
+    let resolved: Awaited<ReturnType<typeof mediaUrlForVideo>>;
+    try { resolved = await mediaUrlForVideo(req.user!.id, p.data.videoId!, p.data.visibility); } catch { return res.status(500).json({error:"動画を確認できませんでした。"}); }
+    if (!resolved) return res.status(403).json({error:"自分がアップロードし、処理が完了した動画のみ投稿できます。"});
+    if ("error" in resolved) return res.status(400).json({error: resolved.error});
+    mediaUrl = resolved.url;
+  }
   try { const id=crypto.randomUUID(), created=new Date().toISOString();
-    await db.execute({sql:"INSERT INTO posts(id,user_id,media_type,media_url,caption,visibility,created_at) VALUES(?,?,?,?,?,?,?)",args:[id,req.user!.id,p.data.mediaType??null,p.data.mediaUrl??null,p.data.caption,p.data.visibility,created]});
+    await db.execute({sql:"INSERT INTO posts(id,user_id,media_type,media_url,caption,visibility,created_at) VALUES(?,?,?,?,?,?,?)",args:[id,req.user!.id,p.data.mediaType??null,mediaUrl,p.data.caption,p.data.visibility,created]});
     res.status(201).json({ok:true,id});
   } catch { res.status(500).json({error:"保存できませんでした。データベース設定を確認してください。"}); }
 });
@@ -316,7 +331,7 @@ api.get("/recommendations",requireAuth,async(req,res)=>{
 api.delete("/posts/:id",requireAuth,async(req,res)=>{
   const id = routeId(req.params.id);
   if (!id) return res.status(400).json({error:"投稿IDが不正です。"});
-  const owned=await db.execute({sql:"SELECT id FROM posts WHERE id=? AND user_id=?",args:[id,req.user!.id]});
+  const owned=await db.execute({sql:"SELECT id, media_type, media_url FROM posts WHERE id=? AND user_id=?",args:[id,req.user!.id]});
   if(!owned.rows.length)return res.status(404).json({error:"投稿が見つからないか、削除権限がありません。"});
   // Remove dependents explicitly so deletion does not rely on foreign-key cascades being enabled.
   await db.batch([
@@ -324,5 +339,6 @@ api.delete("/posts/:id",requireAuth,async(req,res)=>{
     {sql:"DELETE FROM likes WHERE post_id=?",args:[id]},
     {sql:"DELETE FROM posts WHERE id=? AND user_id=?",args:[id,req.user!.id]}
   ], "write");
+  if (owned.rows[0].media_type === "video") await deleteVideoForPost(owned.rows[0].media_url === null ? null : String(owned.rows[0].media_url)).catch(() => undefined);
   res.json({ok:true});
 });

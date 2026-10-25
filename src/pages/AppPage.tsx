@@ -17,7 +17,7 @@ import RightRail from "../components/layout/RightRail";
 import NoticeBanner from "../components/layout/NoticeBanner";
 import RelationsModal from "../components/RelationsModal";
 import MessagesPage from "./messages/MessagesPage";
-import ConversationPage from "./messages/ConversationPage";
+import ConversationPage, { DmEmptyPane } from "./messages/ConversationPage";
 import { onDmEvent, startDmRealtime, stopDmRealtime } from "../lib/dmRealtime";
 import type { PostCardHandlers } from "../components/PostCard";
 import type { NewPost } from "../components/CreatePost";
@@ -373,7 +373,7 @@ export default function App() {
         onOpenProfile={openProfile}
       />
 
-      <main className="main-layout">
+      <main className={`main-layout ${activeTab === "messages" ? "dm-mode" : ""}`}>
         <SideNav user={user} activeTab={activeTab} unread={unread} dmUnread={dmUnread} onOpenTab={openTab} />
 
         <section className="main-column">
@@ -410,18 +410,28 @@ export default function App() {
           )}
 
           {activeTab === "messages" && (
-            route.conversationId ? (
-              <ConversationPage
-                key={route.conversationId}
+            <div className={`dm-shell ${route.conversationId ? "has-chat" : ""}`}>
+              <MessagesPage
                 user={user}
-                conversationId={route.conversationId}
-                onBack={goMessages}
-                onCountsChanged={refreshCounts}
+                counts={dmCounts}
+                selectedId={route.conversationId}
+                onOpenConversation={openConversation}
                 onNotice={tell}
               />
-            ) : (
-              <MessagesPage user={user} counts={dmCounts} onOpenConversation={openConversation} onNotice={tell} />
-            )
+              {route.conversationId ? (
+                <ConversationPage
+                  key={route.conversationId}
+                  user={user}
+                  conversationId={route.conversationId}
+                  onBack={goMessages}
+                  onCountsChanged={refreshCounts}
+                  onNotice={tell}
+                  onOpenProfile={openProfile}
+                />
+              ) : (
+                <DmEmptyPane />
+              )}
+            </div>
           )}
 
           {activeTab === "profile" && (
@@ -464,7 +474,7 @@ export default function App() {
           )}
         </section>
 
-        <RightRail user={user} onOpenPost={openPost} onOpenProfile={openProfile} onNotice={tell} />
+        {activeTab !== "messages" && <RightRail user={user} onOpenPost={openPost} onOpenProfile={openProfile} onNotice={tell} />}
       </main>
 
       <BottomNav activeTab={activeTab} unread={unread} dmUnread={dmUnread} onOpenTab={openTab} />

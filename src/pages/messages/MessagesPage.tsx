@@ -1,22 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
-import type { FormEvent } from "react";
-import { LoaderCircle, MessageCircle, Search, Users, X } from "lucide-react";
+import { LoaderCircle, Search, SquarePen } from "lucide-react";
 import Avatar from "../../components/Avatar";
-import CountBadge from "../../components/layout/CountBadge";
 import { api } from "../../lib/api";
 import { onDmEvent } from "../../lib/dmRealtime";
 import { errorMessage } from "../../lib/errors";
-import { timeAgo } from "../../lib/format";
-import type { DmConversation, Person, User } from "../../types";
+import type { DmConversation, DmNote, User } from "../../types";
+import NewMessageSheet from "./NewMessageSheet";
+import NotesRow from "./NotesRow";
+import { shortAgo } from "./dmFormat";
 
 type Props = {
   user: User;
   counts: Record<string, number>;
+  selectedId?: string;
   onOpenConversation: (id: string) => void;
   onNotice: (text: string) => void;
 };
-
-const MAX_OTHERS = 19; // a group holds at most 20 people including the creator
 
 // Name shown for a conversation: the group title, or the other members' names.
 const titleOf = (c: DmConversation, me: string) => {
@@ -25,11 +24,13 @@ const titleOf = (c: DmConversation, me: string) => {
   return others.map(m => m.display_name).join("、") || "自分だけのチャット";
 };
 
-// Direct and group chats, newest first, with unread counts per conversation.
-export default function MessagesPage({ user, counts, onOpenConversation, onNotice }: Props) {
+// Instagram-style inbox: header, search, notes, and the thread list with unread dots.
+export default function MessagesPage({ user, counts, selectedId, onOpenConversation, onNotice }: Props) {
   const [conversations, setConversations] = useState<DmConversation[]>([]);
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [notes, setNotes] = useState<{ mine: DmNote | null; notes: DmNote[] }>({ mine: null, notes: [] });
 
   const load = useCallback(async () => {
     try {
@@ -42,7 +43,21 @@ export default function MessagesPage({ user, counts, onOpenConversation, onNotic
     }
   }, [onNotice]);
 
+  // Notes are a nice-to-have: a failure here should not hide the inbox.
+  const loadNotes = useCallback(async () => {
+    try {
+      setNotes(await api<{ mine: DmNote | null; notes: DmNote[] }>("/dm/notes"));
+    } catch {
+      // Keep whatever was shown last.
+    }
+  }, []);
+
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void loadNotes();
+    const timer = window.setInterval(() => void loadNotes(), 60_000);
+    return () => window.clearInterval(timer);
+  }, [loadNotes]);
 
   // New messages change previews and ordering; new memberships add conversations. Reload, lightly debounced.
   useEffect(() => {
@@ -57,142 +72,116 @@ export default function MessagesPage({ user, counts, onOpenConversation, onNotic
     };
   }, [load]);
 
+  // Opens (or reuses) a 1:1 chat with someone whose note was tapped.
+  const startChat = async (userId: string) => {
+    try {
+      const r = await api<{ id: string }>("/dm/conversations", {
+        method: "POST",
+        body: JSON.stringify({ userIds: [userId], title: "" })
+      });
+      onOpenConversation(r.id);
+    } catch (e) {
+      onNotice(errorMessage(e, "会話を開けませんでした"));
+    }
+  };
+
+  const query = filter.trim();
+  const visible = query ? conversations.filter(c => titleOf(c, user.id).includes(query)) : conversations;
+
   return (
-    <section className="page-panel dm-panel">
-      <div className="dm-head">
-        <div className="page-heading">
-          <span className="eyebrow">MESSAGES</span>
-          <h1>メッセージ</h1>
-          <p>写真を送って、友達やグループとつながろう。</p>
+    <aside className="dm-inbox" aria-label="メッセージ一覧">
+      <header className="dm-inbox-head">
+        <h2>{user.display_name}</h2>
+        <button type="button" className="dm-icon-btn" onClick={() => setComposing(true)} aria-label="新規メッセージ" title="新規メッセージ">
+          <SquarePen size={23} />
+        </button>
+      </header>
+
+      <label className="dm-search">
+        <Search size={15} />
+        <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="検索" aria-label="メッセージを検索" />
+      </label>
+
+      <NotesRow
+        user={user}
+        mine={notes.mine}
+        notes={notes.notes}
+        onOpenChat={id => void startChat(id)}
+        onChanged={() => void loadNotes()}
+        onNotice={onNotice}
+      />
+
+      <div className="dm-inbox-title"><strong>メッセージ</strong></div>
+
+      {loading ? (
+        <div className="dm-state"><LoaderCircle className="spin" size={20} /></div>
+      ) : conversations.length === 0 ? (
+        <div className="dm-welcome">
+          <h3>メッセージを送信しましょう</h3>
+          <p>友達やグループとメッセージや写真をやり取りできます。</p>
+          <button type="button" className="dm-primary-btn" onClick={() => setComposing(true)}>メッセージを送信</button>
         </div>
-        <button className="primary-button" onClick={() => setComposing(v => !v)}>{composing ? "閉じる" : "新規作成"}</button>
-      </div>
+      ) : visible.length === 0 ? (
+        <p className="dm-state-text">一致する会話がありません</p>
+      ) : (
+        <ul className="dm-thread-list">
+          {visible.map(c => (
+            <li key={c.id}>
+              <ThreadRow
+                conversation={c}
+                me={user.id}
+                unread={counts[c.id] ?? 0}
+                active={c.id === selectedId}
+                onOpen={() => onOpenConversation(c.id)}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
 
       {composing && (
-        <NewConversation
+        <NewMessageSheet
+          onClose={() => setComposing(false)}
           onCreated={id => { setComposing(false); onOpenConversation(id); }}
           onNotice={onNotice}
         />
       )}
-
-      {loading ? (
-        <div className="loading-state"><LoaderCircle className="spin" /><span>読み込み中…</span></div>
-      ) : conversations.length ? (
-        <div className="dm-list">
-          {conversations.map(c => {
-            const others = c.members.filter(m => m.id !== user.id);
-            const unread = counts[c.id] ?? 0;
-            return (
-              <button key={c.id} className={`dm-row ${unread ? "unread" : ""}`} onClick={() => onOpenConversation(c.id)}>
-                <span className="dm-avatar">
-                  {c.is_group
-                    ? <span className="dm-group-icon"><Users size={18} /></span>
-                    : <Avatar url={others[0]?.avatar_url ?? null} name={others[0]?.display_name ?? ""} />}
-                </span>
-                <span className="dm-row-copy">
-                  <strong>{titleOf(c, user.id)}</strong>
-                  <small>{c.is_group ? `${c.members.length}人のグループ · ` : ""}{timeAgo(c.last_message_at)}</small>
-                </span>
-                <CountBadge count={unread} />
-              </button>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="empty-state">
-          <div className="empty-art"><MessageCircle size={26} /></div>
-          <h3>まだメッセージはありません</h3>
-          <p>「新規作成」から友達にメッセージを送りましょう。</p>
-        </div>
-      )}
-    </section>
+    </aside>
   );
 }
 
-// Pick one person for a 1:1 chat, or several (with an optional name) for a group.
-function NewConversation({ onCreated, onNotice }: { onCreated: (id: string) => void; onNotice: (text: string) => void }) {
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Person[]>([]);
-  const [picked, setPicked] = useState<Person[]>([]);
-  const [title, setTitle] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const search = async (e?: FormEvent) => {
-    e?.preventDefault();
-    const q = query.trim();
-    if (!q) return setResults([]);
-    try {
-      const r = await api<{ users: Person[] }>(`/users/search?q=${encodeURIComponent(q)}`);
-      setResults(r.users);
-    } catch (err) {
-      onNotice(errorMessage(err, "検索できませんでした"));
-    }
-  };
-
-  const toggle = (person: Person) => {
-    if (picked.some(p => p.id === person.id)) {
-      setPicked(picked.filter(p => p.id !== person.id));
-      return;
-    }
-    if (picked.length >= MAX_OTHERS) {
-      onNotice(`一度に選べるのは${MAX_OTHERS}人までです。`);
-      return;
-    }
-    setPicked([...picked, person]);
-  };
-
-  const create = async () => {
-    if (!picked.length || busy) return;
-    setBusy(true);
-    try {
-      const r = await api<{ id: string }>("/dm/conversations", {
-        method: "POST",
-        body: JSON.stringify({ userIds: picked.map(p => p.id), title: picked.length > 1 ? title : "" })
-      });
-      onCreated(r.id);
-    } catch (e) {
-      onNotice(errorMessage(e, "会話を作成できませんでした"));
-    } finally {
-      setBusy(false);
-    }
-  };
+function ThreadRow({ conversation: c, me, unread, active, onOpen }: {
+  conversation: DmConversation;
+  me: string;
+  unread: number;
+  active: boolean;
+  onOpen: () => void;
+}) {
+  const others = c.members.filter(m => m.id !== me);
+  const sender = c.members.find(m => m.id === c.last_sender_id);
+  const who = !c.last_preview ? "" : c.last_sender_id === me ? "あなた: " : c.is_group && sender ? `${sender.display_name}: ` : "";
+  const isUnread = unread > 0;
 
   return (
-    <div className="dm-compose">
-      <form className="large-search" onSubmit={search}>
-        <Search size={18} />
-        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="ユーザー名で検索" />
-        <button className="outline-small" type="submit">検索</button>
-      </form>
-
-      {picked.length > 0 && (
-        <div className="dm-picked">
-          {picked.map(p => (
-            <button key={p.id} className="dm-chip" onClick={() => toggle(p)}>{p.display_name}<X size={13} /></button>
-          ))}
-        </div>
-      )}
-
-      <div className="people-list">
-        {results.map(p => {
-          const selected = picked.some(x => x.id === p.id);
-          return (
-            <div className="person-row" key={p.id}>
-              <span className="plain-avatar"><Avatar url={p.avatar_url} name={p.display_name} /></span>
-              <span className="person-info"><strong>{p.display_name}</strong><span>{p.bio || "SoraLinkを利用しています"}</span></span>
-              <button className={selected ? "primary-button" : "outline-small"} onClick={() => toggle(p)}>{selected ? "選択中" : "追加"}</button>
-            </div>
-          );
-        })}
-      </div>
-
-      {picked.length > 1 && (
-        <input className="dm-title-input" value={title} onChange={e => setTitle(e.target.value)} maxLength={60} placeholder="グループ名（任意）" />
-      )}
-
-      <button className="primary-button" disabled={!picked.length || busy} onClick={() => void create()}>
-        {picked.length > 1 ? "グループを作成" : "チャットを始める"}
-      </button>
-    </div>
+    <button type="button" className={`dm-thread ${isUnread ? "is-unread" : ""} ${active ? "is-active" : ""}`} onClick={onOpen}>
+      <span className="dm-thread-avatar">
+        {c.is_group ? (
+          <span className="dm-group-avatar">
+            <Avatar url={others[0]?.avatar_url ?? null} name={others[0]?.display_name ?? ""} />
+            <Avatar url={others[1]?.avatar_url ?? null} name={others[1]?.display_name ?? ""} />
+          </span>
+        ) : (
+          <Avatar url={others[0]?.avatar_url ?? null} name={others[0]?.display_name ?? ""} />
+        )}
+      </span>
+      <span className="dm-thread-body">
+        <span className="dm-thread-name">{titleOf(c, me)}</span>
+        <span className="dm-thread-preview">{c.last_preview ? `${who}${c.last_preview}` : "チャットを始めましょう"}</span>
+      </span>
+      <span className="dm-thread-side">
+        <time dateTime={c.last_message_at}>{shortAgo(c.last_message_at)}</time>
+        {isUnread && <span className="dm-unread-dot" aria-label={`未読${unread}件`} />}
+      </span>
+    </button>
   );
 }

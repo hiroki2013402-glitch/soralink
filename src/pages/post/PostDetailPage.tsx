@@ -2,6 +2,8 @@ import { ArrowLeft, Heart, LoaderCircle, MessageCircle, Share2, Trash2, X } from
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import Avatar from "../../components/Avatar";
+import VideoPlayer from "../../components/VideoPlayer";
+import { posterFor } from "../../lib/video";
 import { api } from "../../lib/api";
 import { errorMessage } from "../../lib/errors";
 import { formatDateTime, timeAgo } from "../../lib/format";
@@ -123,8 +125,8 @@ export function PostDetailPage({ postId, user, onBack, onProfile, onOpenImage, o
               </button>
             )}
             {post.media_url && post.media_type === "video" && (
-              <div className="x-detail-media">
-                <video src={post.media_url} controls playsInline preload="metadata" />
+              <div className="x-detail-media x-post-video">
+                <VideoPlayer src={post.media_url} poster={posterFor(post.media_url)} label="投稿の動画" />
               </div>
             )}
 
