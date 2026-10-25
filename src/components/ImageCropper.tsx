@@ -39,7 +39,7 @@ const clamp = (value: number, max: number) => Math.min(max, Math.max(-max, value
 
 export default function ImageCropper({ file, shape, onCancel, onConfirm }: Props) {
   const spec = SPECS[shape];
-  const [src, setSrc] = useState("");
+  const [bitmap, setBitmap] = useState<ImageBitmap | null>(null);
   const [natural, setNatural] = useState<Size | null>(null);
   const [frame, setFrame] = useState<Size>({ w: 0, h: 0 });
   const [zoom, setZoom] = useState(1);
@@ -47,13 +47,37 @@ export default function ImageCropper({ file, shape, onCancel, onConfirm }: Props
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const frameRef = useRef<HTMLDivElement>(null);
-  const imgRef = useRef<HTMLImageElement>(null);
+  const previewRef = useRef<HTMLCanvasElement>(null);
   const drag = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+  const g = layout(natural, frame, zoom);
+  const ox = clamp(offset.x, g.maxX);
+  const oy = clamp(offset.y, g.maxY);
+  const left = (frame.w - g.dispW) / 2 + ox;
+  const top = (frame.h - g.dispH) / 2 + oy;
 
   useEffect(() => {
-    const url = URL.createObjectURL(file);
-    setSrc(url);
-    return () => URL.revokeObjectURL(url);
+    let cancelled = false;
+    let decoded: ImageBitmap | null = null;
+    setBitmap(null);
+    setNatural(null);
+    setError("");
+
+    createImageBitmap(file).then(image => {
+      if (cancelled) {
+        image.close();
+        return;
+      }
+      decoded = image;
+      setBitmap(image);
+      setNatural({ w: image.width, h: image.height });
+    }).catch(() => {
+      if (!cancelled) setError("この画像形式はブラウザーで開けません。JPG、PNG、WebP形式の画像を選んでください。");
+    });
+
+    return () => {
+      cancelled = true;
+      decoded?.close();
+    };
   }, [file]);
 
   useLayoutEffect(() => {
@@ -66,17 +90,25 @@ export default function ImageCropper({ file, shape, onCancel, onConfirm }: Props
     return () => observer.disconnect();
   }, []);
 
+  useLayoutEffect(() => {
+    const canvas = previewRef.current;
+    if (!canvas || !bitmap || !g.dispW || !g.dispH) return;
+    const scale = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.max(1, Math.round(g.dispW * scale));
+    canvas.height = Math.max(1, Math.round(g.dispH * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      setError("画像を表示できません。別の画像でお試しください。");
+      return;
+    }
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  }, [bitmap, g.dispW, g.dispH]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy) onCancel(); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [busy, onCancel]);
-
-  const g = layout(natural, frame, zoom);
-  const ox = clamp(offset.x, g.maxX);
-  const oy = clamp(offset.y, g.maxY);
-  const left = (frame.w - g.dispW) / 2 + ox;
-  const top = (frame.h - g.dispH) / 2 + oy;
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -93,8 +125,7 @@ export default function ImageCropper({ file, shape, onCancel, onConfirm }: Props
   };
 
   const save = async () => {
-    const img = imgRef.current;
-    if (!natural || !img || busy) return;
+    if (!natural || !bitmap || busy) return;
     setBusy(true);
     setError("");
     try {
@@ -106,10 +137,11 @@ export default function ImageCropper({ file, shape, onCancel, onConfirm }: Props
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("canvas");
       ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(img, -left / g.scale, -top / g.scale, frame.w / g.scale, frame.h / g.scale, 0, 0, outWidth, outHeight);
+      ctx.drawImage(bitmap, -left / g.scale, -top / g.scale, frame.w / g.scale, frame.h / g.scale, 0, 0, outWidth, outHeight);
       const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/webp", 0.9));
       if (!blob) throw new Error("encode");
-      onConfirm(new File([blob], `${shape}-${Date.now()}.webp`, { type: blob.type }));
+      const extension = blob.type === "image/jpeg" ? "jpg" : blob.type === "image/png" ? "png" : "webp";
+      onConfirm(new File([blob], `${shape}-${Date.now()}.${extension}`, { type: blob.type }));
     } catch {
       setError("画像を切り抜けませんでした。別の画像でお試しください。");
       setBusy(false);
@@ -132,18 +164,7 @@ export default function ImageCropper({ file, shape, onCancel, onConfirm }: Props
             onPointerUp={() => { drag.current = null; }}
             onPointerCancel={() => { drag.current = null; }}
           >
-            {src && (
-              <img
-                ref={imgRef}
-                className="crop-image"
-                src={src}
-                alt=""
-                draggable={false}
-                onLoad={e => setNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
-                onError={() => setError("画像を読み込めませんでした。別の画像でお試しください。")}
-                style={{ left, top, width: g.dispW, height: g.dispH }}
-              />
-            )}
+            {bitmap && <canvas ref={previewRef} className="crop-image" style={{ left, top, width: g.dispW, height: g.dispH }} aria-hidden="true" />}
           </div>
         </div>
         <p className="crop-hint">ドラッグで位置を合わせ、スライダーで拡大縮小します。</p>
