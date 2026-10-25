@@ -3,6 +3,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import helmet from "helmet";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
@@ -24,9 +25,14 @@ app.get("/api/health", (_req, res) => res.json({ ok: true, name: "SoraLink", ver
 registerOAuthRoutes(app);
 app.use("/api", api);
 
-if (config.nodeEnv === "production") {
-  app.use(express.static(path.join(projectRoot, "dist"), { index: false, maxAge: "1h" }));
-  app.get("*", (_req, res) => res.sendFile(path.join(projectRoot, "dist", "index.html")));
+const clientBuildDir = path.join(projectRoot, "dist");
+const clientIndex = path.join(clientBuildDir, "index.html");
+if (existsSync(clientIndex)) {
+  app.use(express.static(clientBuildDir, { index: false, maxAge: "1h" }));
+  app.get("*", (req, res, next) => {
+    if (req.path === "/api" || req.path.startsWith("/api/")) return next();
+    res.sendFile(clientIndex);
+  });
 }
 
 await initializeDatabase();

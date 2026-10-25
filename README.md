@@ -51,6 +51,8 @@ Deploy this folder as a Node web service:
 - **Start Command:** `npm start`
 - **Health check path:** `/api/health`
 
+The server serves the built frontend from `dist` when it is present; this does not depend on `NODE_ENV`.
+
 Add the environment variables in Render's Environment settings. Set `SENNIN_REDIRECT_URI` to the exact deployed callback URL and register that same URI in the Sennin Account OAuth app. Do not commit `.env` or database tokens.
 
 ## Media URLs
