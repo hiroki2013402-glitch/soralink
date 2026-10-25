@@ -25,7 +25,7 @@ SoraLink is a responsive social photo/video sharing app built with React + TypeS
 - A Turso database and auth token
 - An OAuth application registered in Sennin Account
 - Turso database and auth token; images are stored in Turso, so monitor database storage and read/write usage. Images are limited to 20 MB per file.
-- Supabase project (direct messages and notes), and a separate Turso database dedicated to video chunks
+- Supabase project (direct messages and notes); a separate Turso database is required only if video uploads are needed
 
 ## Source layout
 
@@ -76,7 +76,7 @@ This keeps the app self-contained, but media can consume Turso storage and read/
 
 ## Video storage (R2-free)
 
-Video binary data is stored in a **separate Turso database** from the app's main database. Configure `VIDEO_TURSO_DATABASE_URL` and `VIDEO_TURSO_AUTH_TOKEN` with credentials for a new database created specifically for video chunks. Keep `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` for the existing application database. Do not point both pairs at the same database if you want data isolated.
+Video binary data is stored in a **separate Turso database** from the app's main database. To enable video uploads, configure `VIDEO_TURSO_DATABASE_URL` and `VIDEO_TURSO_AUTH_TOKEN` with credentials for a new database created specifically for video chunks. Keep `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` for the existing application database. Do not point both pairs at the same database if you want data isolated. If the video database is missing or cannot be reached at startup, the app still starts, but video endpoints return HTTP 503 until the video database is configured and the service is restarted. The startup log includes the database connection error, and `/api/health` reports `videoStorage: "unavailable"`.
 
 The browser uploads each video as 256 KiB binary chunks to the application server; the server writes each chunk to the dedicated video database. Playback supports HTTP byte ranges so the player can seek and buffer portions of the file. R2 credentials and buckets are not required. The upload limit is 200 MB per video, but actual capacity and write limits depend on your Turso plan. Large videos can use substantial database storage and write usage, so check your plan before opening uploads to many users.
 

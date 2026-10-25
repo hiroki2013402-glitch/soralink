@@ -12,7 +12,7 @@ import { registerOAuthRoutes } from "./oauth.js";
 import { api } from "./routes.js";
 import { dm } from "./dm.js";
 import { videos } from "./videos.js";
-import { initializeVideoDatabase } from "./videoDb.js";
+import { initializeVideoDatabase, isVideoDatabaseReady } from "./videoDb.js";
 
 const app = express();
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -72,7 +72,12 @@ app.use("/api", (req, res, next) => {
 });
 app.use(cookieParser());
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, name: "SoraLink", version: "2.0.0" }));
+app.get("/api/health", (_req, res) => res.json({
+  ok: true,
+  name: "SoraLink",
+  version: "2.0.0",
+  videoStorage: isVideoDatabaseReady() ? "ready" : "unavailable"
+}));
 registerOAuthRoutes(app);
 app.use("/api", dm);
 app.use("/api", videos);

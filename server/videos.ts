@@ -5,7 +5,7 @@ import express from "express";
 import { z } from "zod";
 import { requireAuth } from "./auth.js";
 import { db } from "./db.js";
-import { videoDb } from "./videoDb.js";
+import { getVideoDatabase, isVideoDatabaseReady } from "./videoDb.js";
 import { canSeePost, resolveViewer, VISIBILITIES } from "./visibility.js";
 
 // Video bytes are stored as BLOB chunks in a dedicated Turso database. R2 is not used.
@@ -16,6 +16,12 @@ const VIDEO_EXTENSIONS = new Map([["video/mp4", "mp4"], ["video/webm", "webm"], 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const idParam = (v: unknown) => typeof v === "string" && UUID.test(v) ? v : "";
 const apiPathFor = (id: string) => `/api/media/video/${id}`;
+function requireVideoDatabase(_req: Request, res: Response, next: () => void) {
+  if (!isVideoDatabaseReady()) {
+    return res.status(503).json({error:"動画機能を利用できません。動画専用Tursoの設定と接続を確認してください。"});
+  }
+  next();
+}
 const presignSchema = z.object({
   mimeType: z.enum(["video/mp4", "video/webm", "video/quicktime"]),
   size: z.number().int().positive().max(MAX_VIDEO_BYTES, "動画は200MB以下にしてください。"),
@@ -37,16 +43,16 @@ export async function mediaUrlForVideo(userId: string, videoId: string, _visibil
 }
 export async function deleteVideoForPost(mediaUrl: string | null | undefined) {
   const id = videoIdFromMediaUrl(mediaUrl); if (!id) return;
-  await videoDb.execute({sql:"DELETE FROM video_chunks WHERE video_id=?",args:[id]}).catch(()=>undefined);
+  if (isVideoDatabaseReady()) await getVideoDatabase().execute({sql:"DELETE FROM video_chunks WHERE video_id=?",args:[id]}).catch(()=>undefined);
   await db.execute({sql:"DELETE FROM media_videos WHERE id=?",args:[id]});
 }
 async function discard(id: string) {
-  await videoDb.execute({sql:"DELETE FROM video_chunks WHERE video_id=?",args:[id]}).catch(()=>undefined);
+  await getVideoDatabase().execute({sql:"DELETE FROM video_chunks WHERE video_id=?",args:[id]}).catch(()=>undefined);
   await db.execute({sql:"DELETE FROM media_videos WHERE id=?",args:[id]}).catch(()=>undefined);
 }
 
 // Reserve a video record. Video chunks are then PUT directly to this server and persisted in VIDEO Turso.
-videos.post("/media/video/presign", requireAuth, async (req,res) => {
+videos.post("/media/video/presign", requireAuth, requireVideoDatabase, async (req,res) => {
   const parsed = presignSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({error:parsed.error.issues[0]?.message || "動画の形式を確認してください。"});
   const {mimeType,size,fileName} = parsed.data;
@@ -58,7 +64,7 @@ videos.post("/media/video/presign", requireAuth, async (req,res) => {
 });
 
 // Each request stores one bounded binary chunk in the separate video database.
-videos.put("/media/video/:id/chunk/:index", requireAuth, express.raw({type:"application/octet-stream",limit:"270kb"}), async (req,res) => {
+videos.put("/media/video/:id/chunk/:index", requireAuth, requireVideoDatabase, express.raw({type:"application/octet-stream",limit:"270kb"}), async (req,res) => {
   const id=idParam(req.params.id), index=Number(req.params.index);
   if (!id || !Number.isSafeInteger(index) || index<0 || !Buffer.isBuffer(req.body) || req.body.length<1 || req.body.length>VIDEO_CHUNK_BYTES) return res.status(400).json({error:"動画チャンクが不正です。"});
   try {
@@ -67,21 +73,21 @@ videos.put("/media/video/:id/chunk/:index", requireAuth, express.raw({type:"appl
     if (r.rows[0].status === "ready") return res.status(409).json({error:"アップロード済みの動画です。"});
     const total=Number(r.rows[0].size_bytes), count=Math.ceil(total/VIDEO_CHUNK_BYTES);
     if (index>=count || req.body.length !== (index===count-1 ? total-index*VIDEO_CHUNK_BYTES : VIDEO_CHUNK_BYTES)) return res.status(400).json({error:"動画チャンクのサイズが一致しません。"});
-    await videoDb.execute({sql:"INSERT INTO video_chunks(video_id,chunk_index,data) VALUES(?,?,?) ON CONFLICT(video_id,chunk_index) DO UPDATE SET data=excluded.data",args:[id,index,new Uint8Array(req.body)]});
+    await getVideoDatabase().execute({sql:"INSERT INTO video_chunks(video_id,chunk_index,data) VALUES(?,?,?) ON CONFLICT(video_id,chunk_index) DO UPDATE SET data=excluded.data",args:[id,index,new Uint8Array(req.body)]});
     res.json({ok:true,index});
   } catch { res.status(500).json({error:"動画を動画専用Tursoへ保存できませんでした。プランの容量・書き込み制限を確認してください。"}); }
 });
 
-videos.post("/media/video/complete", requireAuth, async (req,res) => {
+videos.post("/media/video/complete", requireAuth, requireVideoDatabase, async (req,res) => {
   const id=idParam(req.body?.id); if (!id) return res.status(400).json({error:"動画IDが不正です。"});
   try {
     const r=await db.execute({sql:"SELECT * FROM media_videos WHERE id=? AND user_id=?",args:[id,req.user!.id]});
     if (!r.rows.length) return res.status(404).json({error:"動画が見つかりません。"});
     if (r.rows[0].status === "ready") return res.json({ok:true,id});
     const size=Number(r.rows[0].size_bytes), count=Math.ceil(size/VIDEO_CHUNK_BYTES);
-    const check=await videoDb.execute({sql:"SELECT chunk_index,length(data) AS bytes FROM video_chunks WHERE video_id=? ORDER BY chunk_index",args:[id]});
+    const check=await getVideoDatabase().execute({sql:"SELECT chunk_index,length(data) AS bytes FROM video_chunks WHERE video_id=? ORDER BY chunk_index",args:[id]});
     if (check.rows.length!==count || check.rows.some((row,i)=>Number(row.chunk_index)!==i || Number(row.bytes)!==(i===count-1?size-i*VIDEO_CHUNK_BYTES:VIDEO_CHUNK_BYTES))) return res.status(400).json({error:"動画の一部が未送信です。アップロードを再試行してください。"});
-    const first=await videoDb.execute({sql:"SELECT data FROM video_chunks WHERE video_id=? AND chunk_index=0",args:[id]});
+    const first=await getVideoDatabase().execute({sql:"SELECT data FROM video_chunks WHERE video_id=? AND chunk_index=0",args:[id]});
     const bytes=first.rows[0]?.data;
     const header=bytes instanceof ArrayBuffer ? Buffer.from(bytes) : Buffer.alloc(0);
     if (!matchesVideoSignature(header,String(r.rows[0].mime_type))) { await discard(id); return res.status(400).json({error:"動画の内容と形式が一致しません。"}); }
@@ -103,12 +109,12 @@ async function servePlayable(req:Request,res:Response) {
     const range=req.headers.range;
     if(range){ const m=/^bytes=(\d*)-(\d*)$/.exec(range); if(!m) return res.status(416).setHeader("Content-Range",`bytes */${size}`).end(); if(m[1]===""){const suffix=Number(m[2]);start=Math.max(0,size-suffix);}else{start=Number(m[1]);if(m[2])end=Number(m[2]);} if(start>=size||end<start){return res.status(416).setHeader("Content-Range",`bytes */${size}`).end();} end=Math.min(end,size-1); }
     const first=Math.floor(start/VIDEO_CHUNK_BYTES), last=Math.floor(end/VIDEO_CHUNK_BYTES);
-    const chunks=await videoDb.execute({sql:"SELECT chunk_index,data FROM video_chunks WHERE video_id=? AND chunk_index BETWEEN ? AND ? ORDER BY chunk_index",args:[id,first,last]});
+    const chunks=await getVideoDatabase().execute({sql:"SELECT chunk_index,data FROM video_chunks WHERE video_id=? AND chunk_index BETWEEN ? AND ? ORDER BY chunk_index",args:[id,first,last]});
     if(chunks.rows.length!==last-first+1) return res.status(500).end();
     const parts=chunks.rows.map(x=>{const d=x.data;return d instanceof ArrayBuffer?Buffer.from(d):Buffer.alloc(0)});
     const combined=Buffer.concat(parts); const body=combined.subarray(start-first*VIDEO_CHUNK_BYTES,end-first*VIDEO_CHUNK_BYTES+1);
     res.status(range?206:200);res.setHeader("Content-Type",String(row.mime_type));res.setHeader("Accept-Ranges","bytes");res.setHeader("Content-Length",String(body.length));res.setHeader("Cache-Control",String(post.visibility)==="public"?"public, max-age=3600":"private, no-store");res.setHeader("X-Content-Type-Options","nosniff");if(range)res.setHeader("Content-Range",`bytes ${start}-${end}/${size}`);res.end(body);
   } catch { if(!res.headersSent)res.status(500).end(); else res.end(); }
 }
-videos.get("/media/video/:id", (req,res)=>{void servePlayable(req,res);});
+videos.get("/media/video/:id", requireVideoDatabase, (req,res)=>{void servePlayable(req,res);});
 videos.get("/media/video/:id/poster", (_req,res)=>res.status(404).end());
