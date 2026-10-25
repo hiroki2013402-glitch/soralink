@@ -80,7 +80,7 @@ export function registerOAuthRoutes(app: Express) {
       await db.execute({
         sql: `INSERT INTO users(id, display_name, email, avatar_url, created_at)
               VALUES(?, ?, ?, ?, ?)
-              ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, email=excluded.email, avatar_url=excluded.avatar_url`,
+              ON CONFLICT(id) DO UPDATE SET email=excluded.email`,
         args: [user.id, user.displayName, user.email, user.avatar, now]
       });
       const sessionToken = randomToken(48);
