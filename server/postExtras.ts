@@ -6,7 +6,7 @@ export type PollView = { options: PollOption[]; total: number; myVote: string | 
 export type Mention = { user_id: string; name: string };
 
 // Adds `mentions` and `poll` to post rows. `poll` is null for posts without one.
-export async function attachPostExtras<T extends { id: string }>(rows: T[], viewer: string | null) {
+export async function attachPostExtras<T extends Record<string, unknown>>(rows: T[], viewer: string | null) {
   const ids = rows.map(r => String(r.id));
   if (!ids.length) return [];
   const marks = ids.map(() => "?").join(",");
