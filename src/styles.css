@@ -337,7 +337,7 @@ button.x-detail-media{cursor:zoom-in}
 .dm-inbox-title{display:flex;align-items:center;padding:10px 20px 6px;border-top:1px solid #efefef}
 .dm-inbox-title strong{font-size:14px;font-weight:700}
 .dm-thread-list{list-style:none;margin:0;padding:4px 0 12px;overflow-y:auto;flex:1;min-height:0}
-.dm-thread{display:flex;align-items:center;gap:12px;width:100%;padding:8px 20px;border:0;background:transparent;text-align:left;color:var(--dm-ink);font:inherit;cursor:pointer}
+.dm-thread{display:flex;align-items:center;gap:12px;width:100%;padding:8px 20px;border:0;background:transparent;text-align:left;color:var(--dm-ink);font:inherit;cursor:pointer;touch-action:pan-y;overscroll-behavior-x:contain}
 .dm-thread:hover{background:#f5f6f7}
 .dm-thread.is-active{background:#e7f3ff}
 .dm-thread-avatar{flex-shrink:0;display:grid;place-items:center}
