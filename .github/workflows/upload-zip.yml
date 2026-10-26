@@ -1,0 +1,140 @@
+name: Upload ZIP Contents to Main
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "upload/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upload-zip-to-main
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Find ZIP file
+        id: zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t files < <(
+            find upload -maxdepth 1 -type f -iname '*.zip' | sort
+          )
+
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "ERROR: upload folder must contain exactly one ZIP file."
+            echo "Found: ${#files[@]}"
+            printf '%s\n' "${files[@]}"
+            exit 1
+          fi
+
+          echo "file=${files[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate ZIP
+        shell: bash
+        env:
+          ZIP_FILE: ${{ steps.zip.outputs.file }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import sys
+          import zipfile
+          from pathlib import PurePosixPath
+
+          zip_path = os.environ["ZIP_FILE"]
+
+          with zipfile.ZipFile(zip_path) as z:
+              for item in z.infolist():
+                  name = item.filename
+
+                  if not name or "\\" in name:
+                      sys.exit(f"Invalid ZIP path: {name!r}")
+
+                  path = PurePosixPath(name)
+
+                  if path.is_absolute() or ".." in path.parts:
+                      sys.exit(f"Unsafe ZIP path: {name}")
+
+                  if path.parts and ":" in path.parts[0]:
+                      sys.exit(f"Unsafe ZIP path: {name}")
+
+                  if item.file_size > 200 * 1024 * 1024:
+                      sys.exit(f"File too large: {name}")
+
+              if len(z.infolist()) > 10000:
+                  sys.exit("ZIP contains too many entries.")
+
+          print("ZIP validation passed.")
+          PY
+
+      - name: Extract ZIP contents
+        shell: bash
+        env:
+          ZIP_FILE: ${{ steps.zip.outputs.file }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/upload-extracted
+
+          python3 - <<'PY'
+          import os
+          import zipfile
+
+          zip_path = os.environ["ZIP_FILE"]
+          destination = "/tmp/upload-extracted"
+
+          with zipfile.ZipFile(zip_path) as z:
+              total_size = sum(item.file_size for item in z.infolist())
+
+              if total_size > 500 * 1024 * 1024:
+                  raise SystemExit("Extracted ZIP exceeds 500 MiB.")
+
+              z.extractall(destination)
+
+          print("ZIP extracted successfully.")
+          PY
+
+      - name: Copy files into repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            /tmp/upload-extracted/ ./
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A -- . \
+            ':(exclude)upload/**' \
+            ':(exclude).github/**'
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update repository from upload ZIP"
+          git push origin HEAD:main
