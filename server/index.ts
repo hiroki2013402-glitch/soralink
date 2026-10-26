@@ -10,6 +10,7 @@ import { config } from "./config.js";
 import { initializeDatabase } from "./db.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { api } from "./routes.js";
+import { admin } from "./admin.js";
 import { dm } from "./dm.js";
 import { videos } from "./videos.js";
 import { initializeVideoDatabase, isVideoDatabaseReady } from "./videoDb.js";
@@ -79,6 +80,7 @@ app.get("/api/health", (_req, res) => res.json({
   videoStorage: isVideoDatabaseReady() ? "ready" : "unavailable"
 }));
 registerOAuthRoutes(app);
+app.use("/api", admin);
 app.use("/api", dm);
 app.use("/api", videos);
 app.use("/api", api);

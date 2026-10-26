@@ -142,6 +142,27 @@ Setup:
 
 Realtime tokens are signed with the project's legacy JWT secret (HS256). If the project uses asymmetric JWT signing keys, update `mintRealtimeToken` in `server/supabase.ts` to match.
 
+## Mentions, hashtags, polls, and image thumbnails
+
+- **@mention**: type `@` plus a display name in a post. The composer suggests matching people. A mention links to that profile only when the name matches an existing user (names without spaces). Mentions are stored with the post (`post_mentions`). Captions only; comments are plain text.
+- **#hashtag**: any `#word` in a caption is stored (`post_hashtags`, lower-cased). Tapping one, or searching `#word`, lists the visible posts with that tag.
+- **Polls**: text-only posts can carry 2 to 4 options (`poll_options`, `poll_votes`). One vote per person; voting again moves the vote. Results show after voting.
+- **Images**: photos above 700 KB also upload a 720px copy (`media_assets.thumb_id`). The feed loads that copy (`/api/media/:id?size=thumb`), and the full image opens on tap. The server caches recently read media in memory (up to 96 MB) and sends ETags, so repeat views skip the Turso chunk reads.
+- Notices and announcements float over the page, so they no longer push the DM or the feed around.
+
+## Admin area (/admin)
+
+Open `/admin` and enter `ADMIN_PASSWORD`. Then sign in with the Sennin Account you want to make admin. That login (and only that login, within 15 minutes of the password check) grants admin rights for 12 hours or until logout. If `ADMIN_SENNIN_ID` is set, only that account can be granted.
+
+Admins can:
+- **Users**: search accounts, open each user's settings screen, suspend or restore an account (suspending also ends all its sessions), see their posts, and jump to their DMs.
+- **Posts**: search every post, edit the text and visibility, or delete a post.
+- **Announcements**: publish a site-wide notice. It appears as a banner for every signed-in user until they close it.
+- **DM**: read every conversation (text and photos, read-only). Every page view is recorded.
+- **Audit log**: every admin action above is recorded with the admin's name and time.
+
+Setup: add `ADMIN_PASSWORD` (use a long random value) and, recommended, `ADMIN_SENNIN_ID` to the environment, then restart. The `sessions.is_admin`, `users.banned_at` / `banned_reason`, `admin_audit` and `announcements` tables are created or migrated on startup.
+
 ## Post visibility, close friends, and search
 
 - Each post has a visibility: **公開** (everyone), **フォロワーのみ** (followers of the author), or **親しい友達** (close friends chosen by the author).

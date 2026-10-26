@@ -1,8 +1,7 @@
-import crypto from "node:crypto";
 import type { Express, Request, Response } from "express";
-import { z } from "zod";
 import { config } from "./config.js";
 import { db } from "./db.js";
+import { ADMIN_GATE_COOKIE, ADMIN_SESSION_MS, adminGateOpen } from "./adminGate.js";
 import { encrypt, hashToken, pkceChallenge, randomToken, signCookie, verifyCookie } from "./security.js";
 
 const cookieOptions = {
@@ -83,15 +82,38 @@ export function registerOAuthRoutes(app: Express) {
               ON CONFLICT(id) DO UPDATE SET email=excluded.email`,
         args: [user.id, user.displayName, user.email, user.avatar, now]
       });
+
+      const account = await db.execute({ sql: "SELECT banned_at FROM users WHERE id = ?", args: [user.id] });
+      if (account.rows[0]?.banned_at) {
+        return res.redirect(`${config.appOrigin}/?auth_error=${encodeURIComponent("このアカウントは利用停止中のため、ログインできません。")}`);
+      }
+
+      // Admin login is only granted when the admin password was accepted just before (see adminGate.ts).
+      const adminFlow = adminGateOpen(req);
+      let grantAdmin = false;
+      let adminError = "";
+      if (adminFlow) {
+        res.clearCookie(ADMIN_GATE_COOKIE, { ...cookieOptions, maxAge: undefined });
+        if (config.adminSenninId && user.id !== `sennin:${config.adminSenninId}`) {
+          adminError = "このアカウントは管理者に設定されていないため、管理者権限は付与されませんでした。";
+        } else {
+          grantAdmin = true;
+        }
+      }
+
+      const sessionMs = grantAdmin ? ADMIN_SESSION_MS : 30 * 24 * 60 * 60 * 1000;
       const sessionToken = randomToken(48);
       const refreshToken = typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : "";
-      const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
+      const expiresAt = Date.now() + sessionMs;
       await db.execute({
-        sql: `INSERT INTO sessions(id_hash, user_id, access_token_enc, refresh_token_enc, expires_at, created_at)
-              VALUES(?, ?, ?, ?, ?, ?)`,
-        args: [hashToken(sessionToken), user.id, encrypt(accessToken), refreshToken ? encrypt(refreshToken) : "", expiresAt, now]
+        sql: `INSERT INTO sessions(id_hash, user_id, access_token_enc, refresh_token_enc, expires_at, created_at, is_admin)
+              VALUES(?, ?, ?, ?, ?, ?, ?)`,
+        args: [hashToken(sessionToken), user.id, encrypt(accessToken), refreshToken ? encrypt(refreshToken) : "", expiresAt, now, grantAdmin ? 1 : 0]
       });
-      res.cookie("soralink_session", signCookie(sessionToken), { ...cookieOptions, maxAge: 30 * 24 * 60 * 60 * 1000 });
+      res.cookie("soralink_session", signCookie(sessionToken), { ...cookieOptions, maxAge: sessionMs });
+      if (adminFlow) {
+        return res.redirect(`${config.appOrigin}/admin${adminError ? `?auth_error=${encodeURIComponent(adminError)}` : ""}`);
+      }
       res.redirect(`${config.appOrigin}/`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Sennin Accountへの接続に失敗しました。";

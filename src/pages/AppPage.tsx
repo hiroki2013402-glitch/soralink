@@ -15,6 +15,9 @@ import SideNav from "../components/layout/SideNav";
 import BottomNav from "../components/layout/BottomNav";
 import RightRail from "../components/layout/RightRail";
 import NoticeBanner from "../components/layout/NoticeBanner";
+import AuthOverlay from "../components/AuthOverlay";
+import AnnouncementBanners from "../components/AnnouncementBanners";
+import { clearAuthPending, isAuthPending } from "../lib/authPending";
 import RelationsModal from "../components/RelationsModal";
 import MessagesPage from "./messages/MessagesPage";
 import ConversationPage, { DmEmptyPane } from "./messages/ConversationPage";
@@ -26,7 +29,7 @@ import { optimizeImage } from "../lib/images";
 import { errorMessage } from "../lib/errors";
 import { parseRoute } from "../lib/route";
 import type { Route, Tab } from "../lib/route";
-import type { Notice, Person, Post, SearchResults, User } from "../types";
+import type { Announcement, Notice, Person, Post, SearchResults, User } from "../types";
 import CloseFriendsModal from "../components/CloseFriendsModal";
 
 // App shell for signed-in pages. Owns the shared state and the route; each page lives in its own file under pages/.
@@ -45,6 +48,9 @@ export default function App() {
   const [dmUnread, setDmUnread] = useState(0);
   const [dmCounts, setDmCounts] = useState<Record<string, number>>({});
   const [liked, setLiked] = useState<Record<string, boolean>>({});
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  // True while returning from Sennin Account: the 認証中 overlay stays until the first load finishes.
+  const [authPending, setAuthPending] = useState(isAuthPending);
 
   const [profileId, setProfileId] = useState<string | null>(null);
   const [profile, setProfile] = useState<User | null>(null);
@@ -88,7 +94,11 @@ export default function App() {
     try {
       const feed = await api<{ posts: Post[] }>("/feed");
       setPosts(feed.posts);
-      const me = await api<{ user: User }>("/me").catch(() => null);
+      // A suspended account gets a clear message here instead of a silent return to the login screen.
+      const me = await api<{ user: User }>("/me").catch((e: unknown) => {
+        if (e instanceof Error && e.message.includes("利用停止")) tell(e.message);
+        return null;
+      });
       setUser(me?.user ?? null);
       if (me) {
         const mine = await api<{ ids: string[] }>("/likes/mine").catch(() => ({ ids: [] as string[] }));
@@ -153,6 +163,13 @@ export default function App() {
     };
   }, [user?.id, refreshCounts]);
 
+  useEffect(() => {
+    if (!user) return;
+    api<{ announcements: Announcement[] }>("/announcements")
+      .then(r => setAnnouncements(r.announcements))
+      .catch(() => setAnnouncements([]));
+  }, [user?.id]);
+
   // Presence: tell the server this user is here. Sent while the tab is visible, so "online" means the app is open and in front.
   useEffect(() => {
     if (!user) return;
@@ -177,6 +194,13 @@ export default function App() {
       history.replaceState({}, "", location.pathname);
     }
   }, [load, tell]);
+
+  useEffect(() => {
+    if (!loading && authPending) {
+      clearAuthPending();
+      setAuthPending(false);
+    }
+  }, [loading, authPending]);
 
   // Browser back/forward.
   useEffect(() => {
@@ -280,6 +304,18 @@ export default function App() {
     }
   };
 
+  // Tapping a #hashtag runs the same search as typing "#tag" in the search box.
+  const searchFor = async (q: string) => {
+    if (!user) return tell("検索にはログインしてください。");
+    setSearch(q);
+    go("/page/search");
+    try {
+      setResults(await api<SearchResults>(`/search?q=${encodeURIComponent(q)}`));
+    } catch (err) {
+      tell(errorMessage(err, "検索できませんでした"));
+    }
+  };
+
   const toggleFollow = async (id: string) => {
     try {
       const r = await api<{ following: boolean }>(`/users/${id}/follow`, { method: "POST" });
@@ -331,7 +367,7 @@ export default function App() {
     e.preventDefault();
     setSaving(true);
     try {
-      const r = await api<{ user: User }>("/me/profile", { method: "PATCH", body: JSON.stringify(profileForm) });
+      const r = await api<{ user: User }>("/me/profile", { method: "POST", body: JSON.stringify(profileForm) });
       setUser(r.user);
       setProfile(r.user);
       setEditing(false);
@@ -366,12 +402,21 @@ export default function App() {
     onProfile: openProfile,
     onOpen: openPost,
     onOpenImage: openImage,
-    onNotice: tell
+    onNotice: tell,
+    onHashtag: (tag: string) => void searchFor(`#${tag}`)
   };
 
   const activeTab = route.tab;
 
-  if (!user) return <LoginPage />;
+  if (!user) {
+    return (
+      <>
+        {notice && <NoticeBanner text={notice} onClose={() => setNotice("")} />}
+        <LoginPage />
+        {authPending && <AuthOverlay />}
+      </>
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -392,6 +437,7 @@ export default function App() {
         <SideNav user={user} activeTab={activeTab} unread={unread} dmUnread={dmUnread} onOpenTab={openTab} />
 
         <section className="main-column">
+          <AnnouncementBanners items={announcements} />
           {notice && <NoticeBanner text={notice} onClose={() => setNotice("")} />}
 
           {activeTab === "home" && (

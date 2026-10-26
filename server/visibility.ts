@@ -10,7 +10,7 @@ export async function resolveViewer(req: Request): Promise<string | null> {
   const raw = verifyCookie(req.cookies?.soralink_session);
   if (!raw) return null;
   const r = await db.execute({
-    sql: "SELECT user_id FROM sessions WHERE id_hash=? AND expires_at>?",
+    sql: "SELECT s.user_id FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash=? AND s.expires_at>? AND u.banned_at IS NULL",
     args: [hashToken(raw), Date.now()]
   });
   return r.rows.length ? String(r.rows[0].user_id) : null;

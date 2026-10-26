@@ -2,7 +2,12 @@ export type Visibility = "public" | "followers" | "close_friends";
 
 export type User = { id:string; display_name:string; email:string|null; avatar_url:string|null; cover_url?:string|null; bio?:string|null; website?:string|null; created_at?:string };
 // media_type / media_url are null for text-only posts. visibility defaults to public on older rows.
-export type Post = { id:string; user_id:string; media_type:"image"|"video"|null; media_url:string|null; caption:string; visibility?:Visibility; created_at:string; display_name:string; avatar_url:string|null; likes_count:number; comments_count?:number; liked?:number|boolean };
+// A @mention in a post: the name as written, and the user it points to.
+export type Mention = { user_id:string; name:string };
+// Poll attached to a post (text-only posts). myVote is the option id the viewer picked, or null.
+export type PollOption = { id:string; label:string; votes:number };
+export type Poll = { options:PollOption[]; total:number; myVote:string|null };
+export type Post = { id:string; user_id:string; media_type:"image"|"video"|null; media_url:string|null; caption:string; visibility?:Visibility; created_at:string; display_name:string; avatar_url:string|null; likes_count:number; comments_count?:number; liked?:number|boolean; mentions?:Mention[]; poll?:Poll|null };
 export type Comment = { id:string; user_id:string; body:string; created_at:string; display_name:string; avatar_url:string|null };
 export type Person = {id:string;display_name:string;avatar_url:string|null;bio?:string|null};
 export type FollowerRow = Person & { close: boolean };
@@ -33,3 +38,26 @@ export type DmDetailConversation = { id:string; is_group:boolean; title:string|n
 export type DmMessage = { id:string; sender_id:string; created_at:string; kind:"text"|"image"; body:string|null; image_url:string|null };
 // A note is a short status shown for 24 hours above the author's avatar in the message list.
 export type DmNote = { user_id:string; body:string; created_at:string; expires_at:string; display_name:string; avatar_url:string|null };
+
+// Site-wide announcement from the admin, shown as a banner.
+export type Announcement = { id:string; title:string; body:string; created_at:string };
+
+// ---- Admin area ----
+export type AdminUser = { id:string; display_name:string; email:string|null; avatar_url:string|null; created_at:string; banned_at:string|null; banned_reason:string|null };
+export type AdminPost = { id:string; user_id?:string; display_name?:string; avatar_url?:string|null; media_type:"image"|"video"|null; media_url:string|null; caption:string; visibility:Visibility; created_at:string };
+export type AdminUserDetail = {
+  user: AdminUser & { cover_url?:string|null; bio?:string|null; website?:string|null };
+  posts: AdminPost[];
+  followers: number;
+  following: number;
+  activeSessions: number;
+};
+export type AdminDmMember = { id:string; display_name:string; avatar_url:string|null; role?:string };
+export type AdminDmConversation = { id:string; is_group:boolean; title:string|null; last_message_at:string; last_preview:string|null; last_sender_name:string|null; members:AdminDmMember[] };
+export type AdminDmMessage = { id:string; sender_id:string; sender_name:string; created_at:string; kind:"text"|"image"; body:string|null; image_url:string|null };
+export type AdminDmDetail = {
+  conversation: { id:string; is_group:boolean; title:string|null; description:string|null; members:AdminDmMember[] };
+  messages: AdminDmMessage[];
+  hasMore: boolean;
+};
+export type AuditEntry = { id:string; action:string; target:string|null; detail:string|null; created_at:string; admin_name:string|null };

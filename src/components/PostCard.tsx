@@ -3,8 +3,11 @@ import type { Post, User } from "../types";
 import Avatar from "./Avatar";
 import VisibilityBadge from "./VisibilityBadge";
 import VideoPlayer from "./VideoPlayer";
+import RichText from "./RichText";
+import PollView from "./PollView";
 import { posterFor } from "../lib/video";
 import { timeAgo } from "../lib/format";
+import { thumbUrl } from "../lib/richText";
 
 type Props = {
   post: Post;
@@ -16,12 +19,13 @@ type Props = {
   onOpen: (id: string) => void;
   onOpenImage: (id: string) => void;
   onNotice: (text: string) => void;
+  onHashtag?: (tag: string) => void;
 };
 
 // Everything a feed or profile needs to forward to a card, except the post itself.
 export type PostCardHandlers = Omit<Props, "post" | "liked">;
 
-export default function PostCard({ post, user, liked, onLike, onDelete, onProfile, onOpen, onOpenImage, onNotice }: Props) {
+export default function PostCard({ post, user, liked, onLike, onDelete, onProfile, onOpen, onOpenImage, onNotice, onHashtag }: Props) {
   const mine = user?.id === post.user_id;
   const likes = Number(post.likes_count) || 0;
   const comments = Number(post.comments_count) || 0;
@@ -57,12 +61,16 @@ export default function PostCard({ post, user, liked, onLike, onDelete, onProfil
         </header>
 
         {post.caption && (
-          <p className="x-post-caption" onClick={() => onOpen(post.id)}>{post.caption}</p>
+          <p className="x-post-caption" onClick={() => onOpen(post.id)}>
+            <RichText text={post.caption} mentions={post.mentions} onMention={onProfile} onHashtag={onHashtag} />
+          </p>
         )}
+
+        {post.poll && <PollView postId={post.id} poll={post.poll} signedIn={!!user} onNotice={onNotice} />}
 
         {post.media_url && post.media_type === "image" && (
           <button className="x-post-media" onClick={() => onOpenImage(post.id)} aria-label="画像を拡大表示">
-            <img src={post.media_url} alt={post.caption || "投稿画像"} loading="lazy" decoding="async" />
+            <img src={thumbUrl(post.media_url)} alt={post.caption || "投稿画像"} loading="lazy" decoding="async" />
           </button>
         )}
         {post.media_url && post.media_type === "video" && (

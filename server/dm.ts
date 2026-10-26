@@ -340,7 +340,7 @@ dm.post("/dm/conversations/:id/messages", requireAuth, uploadImage, async (req, 
   try {
     if (!(await isMember(conversationId, me))) return res.status(404).json({ error: "会話が見つかりません。" });
 
-    let messageId: string = crypto.randomUUID();
+    let messageId = crypto.randomUUID();
     const now = new Date().toISOString();
     let row: Record<string, unknown>;
     let preview: string;

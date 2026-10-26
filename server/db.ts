@@ -119,6 +119,56 @@ export async function initializeDatabase() {
   if (!userNames.has("bio")) await db.execute("ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT ''");
   if (!userNames.has("website")) await db.execute("ALTER TABLE users ADD COLUMN website TEXT");
 
+  // Media thumbnails: an upload may point at a smaller copy of itself, used by the feed.
+  const mediaColumns = await db.execute("PRAGMA table_info(media_assets)");
+  if (!mediaColumns.rows.some((r) => r.name === "thumb_id")) {
+    await db.execute("ALTER TABLE media_assets ADD COLUMN thumb_id TEXT");
+  }
+
+  // Mentions, hashtags and polls. Rows are removed with their post (see postCleanupStatements).
+  await db.batch([
+    `CREATE TABLE IF NOT EXISTS post_mentions (
+      post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id),
+      name TEXT NOT NULL, PRIMARY KEY(post_id, user_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_post_mentions_user ON post_mentions(user_id)`,
+    `CREATE TABLE IF NOT EXISTS post_hashtags (
+      post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, tag TEXT NOT NULL, PRIMARY KEY(post_id, tag)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_post_hashtags_tag ON post_hashtags(tag, post_id)`,
+    `CREATE TABLE IF NOT EXISTS poll_options (
+      id TEXT PRIMARY KEY, post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      label TEXT NOT NULL, position INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_poll_options_post ON poll_options(post_id, position)`,
+    `CREATE TABLE IF NOT EXISTS poll_votes (
+      post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id),
+      option_id TEXT NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE, created_at TEXT NOT NULL,
+      PRIMARY KEY(post_id, user_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_poll_votes_option ON poll_votes(option_id)`
+  ], "write");
+  if (!userNames.has("banned_at")) await db.execute("ALTER TABLE users ADD COLUMN banned_at TEXT");
+  if (!userNames.has("banned_reason")) await db.execute("ALTER TABLE users ADD COLUMN banned_reason TEXT");
+
+  // Sessions granted through the admin login carry is_admin = 1 (see oauth.ts).
+  const sessionColumns = await db.execute("PRAGMA table_info(sessions)");
+  if (!sessionColumns.rows.some((r) => r.name === "is_admin")) {
+    await db.execute("ALTER TABLE sessions ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
+  }
+
+  // Admin tables: an audit log of every admin action, and site-wide announcements.
+  await db.batch([
+    `CREATE TABLE IF NOT EXISTS admin_audit (
+      id TEXT PRIMARY KEY, admin_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT, detail TEXT, created_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit(created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS announcements (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_announcements_created ON announcements(created_at DESC)`
+  ], "write");
+
   // Databases created before post visibility existed get the column here; older rows become public.
   const postColumns = await db.execute("PRAGMA table_info(posts)");
   if (!postColumns.rows.some((r) => r.name === "visibility")) {

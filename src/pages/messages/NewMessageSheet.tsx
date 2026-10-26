@@ -15,11 +15,13 @@ type Props = {
   onNotice: (text: string) => void;
   // When set, the sheet adds people to this existing group instead of starting a chat.
   addTo?: { conversationId: string; existingIds: string[] };
+  // "direct": one person, a 1対1 chat. "group": two or more people and a group name.
+  mode?: "direct" | "group";
 };
 
 // "New message" sheet: search people, pick one (direct chat) or several (group chat), then start.
 // In add mode it lists people who are not yet in the group and adds the picked ones as members.
-export default function NewMessageSheet({ onClose, onCreated, onNotice, addTo }: Props) {
+export default function NewMessageSheet({ onClose, onCreated, onNotice, addTo, mode = "direct" }: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Person[]>([]);
   const [searching, setSearching] = useState(false);
@@ -27,7 +29,10 @@ export default function NewMessageSheet({ onClose, onCreated, onNotice, addTo }:
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const capacity = addTo ? Math.max(0, MAX_MEMBERS - addTo.existingIds.length) : MAX_OTHERS;
+  const isGroup = !addTo && mode === "group";
+  const capacity = addTo ? Math.max(0, MAX_MEMBERS - addTo.existingIds.length) : isGroup ? MAX_OTHERS : 1;
+  // A group needs at least two other people; otherwise the chat would be a 1対1.
+  const groupTooSmall = isGroup && picked.length < 2;
   const visible = addTo ? results.filter(p => !addTo.existingIds.includes(p.id)) : results;
 
   // Escape closes the sheet.
@@ -69,14 +74,14 @@ export default function NewMessageSheet({ onClose, onCreated, onNotice, addTo }:
       return;
     }
     if (picked.length >= capacity) {
-      onNotice(addTo ? `このグループは最大${MAX_MEMBERS}人までです。` : `一度に選べるのは${MAX_OTHERS}人までです。`);
+      onNotice(addTo ? `このグループは最大${MAX_MEMBERS}人までです。` : isGroup ? `一度に選べるのは${MAX_OTHERS}人までです。` : "1対1のチャットは1人を選んでください。");
       return;
     }
     setPicked([...picked, person]);
   };
 
   const create = async () => {
-    if (!picked.length || busy) return;
+    if (!picked.length || busy || groupTooSmall) return;
     setBusy(true);
     try {
       if (addTo) {
@@ -89,7 +94,7 @@ export default function NewMessageSheet({ onClose, onCreated, onNotice, addTo }:
       }
       const r = await api<{ id: string }>("/dm/conversations", {
         method: "POST",
-        body: JSON.stringify({ userIds: picked.map(p => p.id), title: picked.length > 1 ? title : "" })
+        body: JSON.stringify({ userIds: picked.map(p => p.id), title: isGroup || picked.length > 1 ? title : "" })
       });
       onCreated(r.id);
     } catch (e) {
@@ -103,11 +108,11 @@ export default function NewMessageSheet({ onClose, onCreated, onNotice, addTo }:
 
   return (
     <div className="dm-backdrop" onClick={onClose}>
-      <section className="dm-sheet dm-new-sheet" role="dialog" aria-modal="true" aria-label={addTo ? "メンバーを追加" : "新規メッセージ"} onClick={e => e.stopPropagation()}>
+      <section className="dm-sheet dm-new-sheet" role="dialog" aria-modal="true" aria-label={addTo ? "メンバーを追加" : isGroup ? "新規グループチャット" : "新規メッセージ"} onClick={e => e.stopPropagation()}>
         <header className="dm-sheet-head">
           <button type="button" className="dm-icon-btn" onClick={onClose} aria-label="閉じる"><X size={22} /></button>
-          <strong>{addTo ? "メンバーを追加" : "新規メッセージ"}</strong>
-          <button type="button" className="dm-text-btn" onClick={() => void create()} disabled={!picked.length || busy}>
+          <strong>{addTo ? "メンバーを追加" : isGroup ? "新規グループチャット" : "新規メッセージ"}</strong>
+          <button type="button" className="dm-text-btn" onClick={() => void create()} disabled={!picked.length || busy || groupTooSmall}>
             {busy ? busyLabel : actionLabel}
           </button>
         </header>
@@ -130,9 +135,10 @@ export default function NewMessageSheet({ onClose, onCreated, onNotice, addTo }:
           </div>
         </div>
 
-        {!addTo && picked.length > 1 && (
+        {!addTo && (isGroup || picked.length > 1) && (
           <input className="dm-group-title" value={title} onChange={e => setTitle(e.target.value)} maxLength={60} placeholder="グループ名（任意）" aria-label="グループ名" />
         )}
+        {isGroup && <p className="dm-group-hint">{picked.length < 2 ? "グループには2人以上を選んでください" : `${picked.length}人を選択中`}</p>}
 
         <div className="dm-people">
           {searching && <div className="dm-state"><LoaderCircle className="spin" size={20} /></div>}

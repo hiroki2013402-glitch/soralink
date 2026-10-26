@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { LoaderCircle, Search, SquarePen } from "lucide-react";
+import { LoaderCircle, MessageSquarePlus, Search, User as UserIcon, Users } from "lucide-react";
 import Avatar from "../../components/Avatar";
 import { api } from "../../lib/api";
 import { onDmEvent } from "../../lib/dmRealtime";
@@ -28,7 +28,9 @@ const titleOf = (c: DmConversation, me: string) => {
 export default function MessagesPage({ user, counts, selectedId, onOpenConversation, onNotice }: Props) {
   const [conversations, setConversations] = useState<DmConversation[]>([]);
   const [loading, setLoading] = useState(true);
-  const [composing, setComposing] = useState(false);
+  // Which kind of new chat the sheet is creating, or null when it is closed.
+  const [composing, setComposing] = useState<null | "direct" | "group">(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const [notes, setNotes] = useState<{ mine: DmNote | null; notes: DmNote[] }>({ mine: null, notes: [] });
 
@@ -94,9 +96,24 @@ export default function MessagesPage({ user, counts, selectedId, onOpenConversat
     <aside className="dm-inbox" aria-label="メッセージ一覧">
       <header className="dm-inbox-head">
         <h2>{user.display_name}</h2>
-        <button type="button" className="dm-icon-btn" onClick={() => setComposing(true)} aria-label="新規メッセージ" title="新規メッセージ">
-          <SquarePen size={23} />
-        </button>
+        <div className="dm-new-wrap">
+          <button type="button" className="dm-icon-btn" onClick={() => setMenuOpen(v => !v)} aria-label="新規チャット" aria-expanded={menuOpen} title="新規チャット">
+            <MessageSquarePlus size={23} />
+          </button>
+          {menuOpen && (
+            <>
+              <div className="dm-menu-scrim" onClick={() => setMenuOpen(false)} />
+              <div className="dm-menu" role="menu">
+                <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setComposing("direct"); }}>
+                  <UserIcon size={16} />1対1のチャット
+                </button>
+                <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setComposing("group"); }}>
+                  <Users size={16} />グループチャット
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </header>
 
       <label className="dm-search">
@@ -121,7 +138,7 @@ export default function MessagesPage({ user, counts, selectedId, onOpenConversat
         <div className="dm-welcome">
           <h3>メッセージを送信しましょう</h3>
           <p>友達やグループとメッセージや写真をやり取りできます。</p>
-          <button type="button" className="dm-primary-btn" onClick={() => setComposing(true)}>メッセージを送信</button>
+          <button type="button" className="dm-primary-btn" onClick={() => setComposing("direct")}>メッセージを送信</button>
         </div>
       ) : visible.length === 0 ? (
         <p className="dm-state-text">一致する会話がありません</p>
@@ -143,8 +160,9 @@ export default function MessagesPage({ user, counts, selectedId, onOpenConversat
 
       {composing && (
         <NewMessageSheet
-          onClose={() => setComposing(false)}
-          onCreated={id => { setComposing(false); onOpenConversation(id); }}
+          mode={composing}
+          onClose={() => setComposing(null)}
+          onCreated={id => { setComposing(null); onOpenConversation(id); }}
           onNotice={onNotice}
         />
       )}

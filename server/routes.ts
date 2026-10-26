@@ -1,11 +1,13 @@
 import crypto from "node:crypto";
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import multer from "multer";
 import { db } from "./db.js";
 import { requireAuth } from "./auth.js";
 import { canSeePost, resolveViewer, VISIBILITIES, VISIBLE_TO_SQL, visibleArgs } from "./visibility.js";
 import { deleteVideoForPost, mediaUrlForVideo } from "./videos.js";
+import { extractHashtags, extractMentionNames } from "./richText.js";
+import { attachPostExtras, postCleanupStatements } from "./postExtras.js";
 
 export const api = Router();
 const routeId = (value: string | string[] | undefined): string | undefined => typeof value === "string" ? value : undefined;
@@ -23,29 +25,83 @@ api.post("/media/upload", requireAuth, (req, res, next) => upload.single("file")
   const signatureOk = file.mimetype === "image/jpeg" ? starts(0xff,0xd8,0xff) : file.mimetype === "image/png" ? starts(0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a) : file.mimetype === "image/gif" ? (b.subarray(0,6).toString("ascii")==="GIF87a"||b.subarray(0,6).toString("ascii")==="GIF89a") : file.mimetype === "image/webp" ? (b.subarray(0,4).toString("ascii")==="RIFF"&&b.subarray(8,12).toString("ascii")==="WEBP") : false;
   if (!signatureOk) return res.status(400).json({ error: "ファイルの内容と形式が一致しません。対応形式の画像を選択してください。" });
   if (file.size > MAX_FILE_BYTES) return res.status(413).json({ error: "ファイルは20MB以下にしてください。" });
-  try { const id = crypto.randomUUID(); await db.execute({ sql: "INSERT INTO media_assets(id,user_id,mime_type,file_name,size_bytes,created_at) VALUES(?,?,?,?,?,?)", args: [id, req.user!.id, file.mimetype, file.originalname.slice(0, 180), file.size, new Date().toISOString()] }); const chunkSize = 256 * 1024; const statements = []; for (let offset = 0, index = 0; offset < file.buffer.length; offset += chunkSize, index++) statements.push({ sql: "INSERT INTO media_chunks(media_id,chunk_index,data) VALUES(?,?,?)", args: [id, index, new Uint8Array(file.buffer.subarray(offset, Math.min(offset + chunkSize, file.buffer.length)))] }); if (statements.length) await db.batch(statements, "write"); res.status(201).json({ id, url: `/api/media/${id}`, mimeType: file.mimetype, size: file.size }); } catch { res.status(500).json({ error: "メディアをTursoに保存できませんでした。データベースの容量・プランを確認してください。" }); }
+  // An optional smaller copy (uploaded first by the same user) that the feed shows instead of the full image.
+  const thumbRaw = typeof req.body?.thumbId === "string" ? req.body.thumbId : "";
+  if (thumbRaw && !/^[0-9a-f-]{36}$/i.test(thumbRaw)) return res.status(400).json({ error: "サムネイルの指定が不正です。" });
+  if (thumbRaw) {
+    const own = await db.execute({ sql: "SELECT id FROM media_assets WHERE id=? AND user_id=? AND mime_type LIKE 'image/%'", args: [thumbRaw, req.user!.id] });
+    if (!own.rows.length) return res.status(403).json({ error: "自分がアップロードした画像のみ指定できます。" });
+  }
+  try { const id = crypto.randomUUID(); await db.execute({ sql: "INSERT INTO media_assets(id,user_id,mime_type,file_name,size_bytes,created_at,thumb_id) VALUES(?,?,?,?,?,?,?)", args: [id, req.user!.id, file.mimetype, file.originalname.slice(0, 180), file.size, new Date().toISOString(), thumbRaw || null] }); const chunkSize = 256 * 1024; const statements = []; for (let offset = 0, index = 0; offset < file.buffer.length; offset += chunkSize, index++) statements.push({ sql: "INSERT INTO media_chunks(media_id,chunk_index,data) VALUES(?,?,?)", args: [id, index, new Uint8Array(file.buffer.subarray(offset, Math.min(offset + chunkSize, file.buffer.length)))] }); if (statements.length) await db.batch(statements, "write"); res.status(201).json({ id, url: `/api/media/${id}`, mimeType: file.mimetype, size: file.size }); } catch { res.status(500).json({ error: "メディアをTursoに保存できませんでした。データベースの容量・プランを確認してください。" }); }
 });
 
 // Media that belongs to a post follows that post's visibility. Avatars, covers and unattached files stay public.
+// ?size=thumb serves the smaller copy in thumb_id when there is one. Bytes are cached in memory after the
+// visibility check, because one stored file is many Turso rows and the same image is requested again and again.
+const MEDIA_CACHE_LIMIT = 96 * 1024 * 1024;
+const mediaCache = new Map<string, { mime: string; body: Buffer }>();
+let mediaCacheBytes = 0;
+
+function readMediaCache(id: string) {
+  const hit = mediaCache.get(id);
+  if (hit) { mediaCache.delete(id); mediaCache.set(id, hit); }
+  return hit;
+}
+
+function writeMediaCache(id: string, value: { mime: string; body: Buffer }) {
+  if (value.body.length > MEDIA_CACHE_LIMIT / 4) return;
+  const old = mediaCache.get(id);
+  if (old) { mediaCacheBytes -= old.body.length; mediaCache.delete(id); }
+  mediaCache.set(id, value);
+  mediaCacheBytes += value.body.length;
+  while (mediaCacheBytes > MEDIA_CACHE_LIMIT) {
+    const oldest = mediaCache.keys().next().value;
+    if (oldest === undefined) break;
+    mediaCacheBytes -= mediaCache.get(oldest)?.body.length ?? 0;
+    mediaCache.delete(oldest);
+  }
+}
+
 api.get("/media/:id", async (req, res) => {
   try {
     const id = routeId(req.params.id) || "";
-    const r = await db.execute({ sql: "SELECT mime_type,size_bytes FROM media_assets WHERE id=?", args: [id] });
+    const r = await db.execute({ sql: "SELECT mime_type, size_bytes, thumb_id FROM media_assets WHERE id=?", args: [id] });
     if (!r.rows.length) return res.status(404).end();
     const row = r.rows[0];
-    const attached = await db.execute({ sql: "SELECT p.user_id,p.visibility FROM posts p WHERE p.media_url=? LIMIT 1", args: [`/api/media/${id}`] });
+    // Attached when a post uses this file, or when this file is the thumbnail of a post's file.
+    const attached = await db.execute({
+      sql: `SELECT p.user_id, p.visibility FROM posts p
+            WHERE p.media_url = ? OR p.media_url IN (SELECT '/api/media/' || a.id FROM media_assets a WHERE a.thumb_id = ?)
+            LIMIT 1`,
+      args: [`/api/media/${id}`, id]
+    });
     const restricted = attached.rows.length > 0 && attached.rows[0].visibility !== "public";
     if (attached.rows.length && !(await canSeePost(await resolveViewer(req), String(attached.rows[0].user_id), String(attached.rows[0].visibility)))) return res.status(404).end();
-    const chunks = await db.execute({ sql: "SELECT data FROM media_chunks WHERE media_id=? ORDER BY chunk_index", args: [id] });
-    const body = Buffer.concat(chunks.rows.map(({ data }) => {
-      if (!(data instanceof ArrayBuffer)) throw new TypeError("Stored media chunk is not binary data.");
-      return Buffer.from(data);
-    }));
-    res.setHeader("Content-Type", String(row.mime_type));
-    res.setHeader("Content-Length", String(row.size_bytes));
+
+    const servedId = req.query.size === "thumb" && row.thumb_id ? String(row.thumb_id) : id;
+    const etag = `"${servedId}"`;
     res.setHeader("Cache-Control", restricted ? "private, max-age=3600" : "public, max-age=86400, immutable");
     res.setHeader("X-Content-Type-Options", "nosniff");
-    res.end(body);
+    res.setHeader("ETag", etag);
+    if (req.headers["if-none-match"] === etag) return res.status(304).end();
+
+    let media = readMediaCache(servedId);
+    if (!media) {
+      const meta = servedId === id
+        ? row
+        : (await db.execute({ sql: "SELECT mime_type FROM media_assets WHERE id=?", args: [servedId] })).rows[0];
+      if (!meta) return res.status(404).end();
+      const chunks = await db.execute({ sql: "SELECT data FROM media_chunks WHERE media_id=? ORDER BY chunk_index", args: [servedId] });
+      const body = Buffer.concat(chunks.rows.map(({ data }) => {
+        if (!(data instanceof ArrayBuffer)) throw new TypeError("Stored media chunk is not binary data.");
+        return Buffer.from(data);
+      }));
+      media = { mime: String(meta.mime_type), body };
+      writeMediaCache(servedId, media);
+    }
+    res.setHeader("Content-Type", media.mime);
+    res.setHeader("Content-Length", String(media.body.length));
+    res.end(media.body);
   } catch { res.status(500).end(); }
 });
 
@@ -54,18 +110,29 @@ const storedMedia = z.string().regex(/^\/api\/media\/[0-9a-f-]{36}$/i, "アッ�
 const visibilitySchema = z.enum(VISIBILITIES, { errorMap: () => ({ message: "公開範囲の指定が不正です。" }) });
 // A post needs text, media, or both. Media is optional so text-only posts work.
 // Images reference a Turso upload (mediaUrl); videos reference an R2 upload (videoId). The server sets the video URL.
+// A poll is text-only: the caption is the question and each option is one short line.
+const pollSchema = z.object({
+  options: z.array(z.string().trim().min(1, "選択肢を入力してください。").max(60, "選択肢は60文字以内で入力してください。")).min(2, "選択肢は2つ以上入力してください。").max(4, "選択肢は4つまでです。")
+});
 const postSchema = z.object({
   mediaType: z.enum(["image", "video"]).nullish(),
   mediaUrl: storedMedia.nullish(),
   videoId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "アップロード済みの動画を指定してください。").nullish(),
   caption: z.string().trim().max(500).default(""),
-  visibility: visibilitySchema.default("public")
+  visibility: visibilitySchema.default("public"),
+  poll: pollSchema.nullish()
 }).superRefine((value, ctx) => {
   const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
   if (value.mediaType === "image" && (!value.mediaUrl || value.videoId)) issue("メディアの指定が不正です。");
   if (value.mediaType === "video" && (!value.videoId || value.mediaUrl)) issue("メディアの指定が不正です。");
   if (!value.mediaType && (value.mediaUrl || value.videoId)) issue("メディアの指定が不正です。");
   if (!value.mediaType && !value.caption) issue("テキストか画像・動画を入力してください。");
+  if (value.poll) {
+    if (value.mediaType) issue("投票は写真や動画と一緒には投稿できません。");
+    if (!value.caption) issue("投票には質問文を入力してください。");
+    const labels = value.poll.options.map(o => o.toLowerCase());
+    if (new Set(labels).size !== labels.length) issue("同じ選択肢があります。");
+  }
 });
 const commentSchema = z.object({ body: z.string().trim().min(1, "コメントを入力してください。").max(500, "コメントは500文字以内で入力してください。") });
 const profileSchema = z.object({ displayName: z.string().trim().min(1).max(80), bio: z.string().max(300).default(""), website: z.string().max(2048).optional().default(""), avatarUrl: z.union([z.literal(""), mediaUrl, storedMedia]).optional().default(""), coverUrl: z.union([z.literal(""), mediaUrl, storedMedia]).optional().default("") });
@@ -101,7 +168,7 @@ api.get("/feed", async (req, res) => {
       (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) likes_count,
       (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) comments_count
       FROM posts p JOIN users u ON u.id=p.user_id WHERE ${VISIBLE_TO_SQL} ORDER BY p.created_at DESC LIMIT 80`, args: visibleArgs(viewer) });
-    res.json({posts:r.rows});
+    res.json({posts: await attachPostExtras(r.rows, viewer)});
   } catch { res.status(500).json({error:"タイムラインを読み込めませんでした。"}); }
 });
 
@@ -119,7 +186,21 @@ api.post("/posts", requireAuth, async (req,res) => {
     mediaUrl = resolved.url;
   }
   try { const id=crypto.randomUUID(), created=new Date().toISOString();
-    await db.execute({sql:"INSERT INTO posts(id,user_id,media_type,media_url,caption,visibility,created_at) VALUES(?,?,?,?,?,?,?)",args:[id,req.user!.id,p.data.mediaType??null,mediaUrl,p.data.caption,p.data.visibility,created]});
+    const statements: { sql: string; args: string[] | (string | null)[] }[] = [
+      {sql:"INSERT INTO posts(id,user_id,media_type,media_url,caption,visibility,created_at) VALUES(?,?,?,?,?,?,?)",args:[id,req.user!.id,p.data.mediaType??null,mediaUrl,p.data.caption,p.data.visibility,created]}
+    ];
+    // A mention links only when the name matches an existing display name. Other "@words" stay plain text.
+    for (const name of extractMentionNames(p.data.caption)) {
+      const found = await db.execute({ sql: "SELECT id, display_name FROM users WHERE display_name = ? COLLATE NOCASE ORDER BY created_at DESC LIMIT 1", args: [name] });
+      if (found.rows.length) statements.push({ sql: "INSERT OR IGNORE INTO post_mentions(post_id,user_id,name) VALUES(?,?,?)", args: [id, String(found.rows[0].id), String(found.rows[0].display_name)] });
+    }
+    for (const tag of extractHashtags(p.data.caption)) {
+      statements.push({ sql: "INSERT OR IGNORE INTO post_hashtags(post_id,tag) VALUES(?,?)", args: [id, tag] });
+    }
+    (p.data.poll?.options ?? []).forEach((label, position) => {
+      statements.push({ sql: "INSERT INTO poll_options(id,post_id,label,position) VALUES(?,?,?,?)", args: [crypto.randomUUID(), id, label, String(position)] });
+    });
+    await db.batch(statements, "write");
     res.status(201).json({ok:true,id});
   } catch { res.status(500).json({error:"保存できませんでした。データベース設定を確認してください。"}); }
 });
@@ -130,7 +211,8 @@ api.get("/posts/:id", requireAuth, async (req,res) => {
   try {
     const r=await db.execute({sql:`${postSelect} WHERE p.id=? AND ${VISIBLE_TO_SQL}`,args:[req.user!.id,id,...visibleArgs(req.user!.id)]});
     if(!r.rows.length) return res.status(404).json({error:"投稿が見つかりません。"});
-    res.json({post:r.rows[0]});
+    const [post] = await attachPostExtras(r.rows, req.user!.id);
+    res.json({post});
   } catch { res.status(500).json({error:"投稿を読み込めませんでした。"}); }
 });
 
@@ -165,7 +247,7 @@ api.delete("/comments/:id", requireAuth, async (req,res) => {
   res.json({ok:true});
 });
 
-api.patch("/me/profile", requireAuth, async (req, res) => {
+const saveProfileHandler = async (req: Request, res: Response) => {
   // Validate the complete profile payload before writing anything.
   const parsed = profileSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -265,7 +347,12 @@ api.patch("/me/profile", requireAuth, async (req, res) => {
       code: "PROFILE_SAVE_FAILED"
     });
   }
-});
+};
+
+// Keep PATCH for existing clients and add POST for environments that block PATCH.
+api.route("/me/profile")
+  .patch(requireAuth, saveProfileHandler)
+  .post(requireAuth, saveProfileHandler);
 
 api.get("/users/search", requireAuth, async(req,res)=>{
   const q=searchText(req.query.q); if(!q)return res.json({users:[]});
@@ -278,13 +365,17 @@ api.get("/search", requireAuth, async (req, res) => {
   const me = req.user!.id;
   const q = searchText(req.query.q);
   if (!q) return res.json({ users: [], posts: [] });
+  // "#tag" searches the hashtag index; anything else searches names and caption text.
+  const tag = q.startsWith("#") ? q.slice(1).toLowerCase() : null;
+  if (tag !== null && !tag) return res.json({ users: [], posts: [] });
   const pattern = `%${likeEscape(q)}%`;
   try {
-    const [users, posts] = await Promise.all([
-      db.execute({ sql: "SELECT id,display_name,avatar_url,bio FROM users WHERE display_name LIKE ? ESCAPE '\\' AND id<>? ORDER BY display_name COLLATE NOCASE LIMIT 30", args: [pattern, me] }),
-      db.execute({ sql: `${postSelect} WHERE ${VISIBLE_TO_SQL} AND p.caption LIKE ? ESCAPE '\\' ORDER BY p.created_at DESC LIMIT 30`, args: [me, ...visibleArgs(me), pattern] })
-    ]);
-    res.json({ users: users.rows, posts: posts.rows });
+    const usersQuery = tag !== null ? null : db.execute({ sql: "SELECT id,display_name,avatar_url,bio FROM users WHERE display_name LIKE ? ESCAPE '\\' AND id<>? ORDER BY display_name COLLATE NOCASE LIMIT 30", args: [pattern, me] });
+    const postsQuery = tag !== null
+      ? db.execute({ sql: `${postSelect} WHERE ${VISIBLE_TO_SQL} AND p.id IN (SELECT post_id FROM post_hashtags WHERE tag = ?) ORDER BY p.created_at DESC LIMIT 30`, args: [me, ...visibleArgs(me), tag] })
+      : db.execute({ sql: `${postSelect} WHERE ${VISIBLE_TO_SQL} AND p.caption LIKE ? ESCAPE '\\' ORDER BY p.created_at DESC LIMIT 30`, args: [me, ...visibleArgs(me), pattern] });
+    const [users, posts] = await Promise.all([usersQuery, postsQuery]);
+    res.json({ users: users?.rows ?? [], posts: await attachPostExtras(posts.rows, me) });
   } catch { res.status(500).json({ error: "検索できませんでした。" }); }
 });
 
@@ -348,7 +439,7 @@ api.get("/users/:id", requireAuth, async(req,res)=>{
     ]);
     const followed=await db.execute({sql:"SELECT 1 FROM follows WHERE follower_id=? AND followed_id=?",args:[me,id]});
     const isFollowing=followed.rows.length>0;
-    res.json({user:u.rows[0],posts:posts.rows,followers:Number(followers.rows[0]?.n||0),following:Number(following.rows[0]?.n||0),isFollowing});
+    res.json({user:u.rows[0],posts:await attachPostExtras(posts.rows,me),followers:Number(followers.rows[0]?.n||0),following:Number(following.rows[0]?.n||0),isFollowing});
   } catch {
     res.status(500).json({error:"プロフィールを読み込めませんでした。"});
   }
@@ -372,6 +463,29 @@ api.post("/posts/:id/like",requireAuth,async(req,res)=>{
     }
   }catch{
     res.status(500).json({error:"いいねを処理できませんでした。"});
+  }
+});
+
+// Poll vote. One vote per person; voting again moves it to another option.
+const voteSchema = z.object({ optionId: z.string().min(1).max(64) });
+api.post("/posts/:id/vote", requireAuth, async (req, res) => {
+  const id = routeId(req.params.id);
+  const parsed = voteSchema.safeParse(req.body);
+  if (!id || !parsed.success) return res.status(400).json({ error: "投票の内容を確認してください。" });
+  const me = req.user!.id;
+  try {
+    if (!(await visiblePost(me, id))) return res.status(404).json({ error: "投稿が見つかりません。" });
+    const option = await db.execute({ sql: "SELECT id FROM poll_options WHERE id=? AND post_id=?", args: [parsed.data.optionId, id] });
+    if (!option.rows.length) return res.status(400).json({ error: "選択肢が正しくありません。" });
+    await db.execute({
+      sql: `INSERT INTO poll_votes(post_id,user_id,option_id,created_at) VALUES(?,?,?,?)
+            ON CONFLICT(post_id,user_id) DO UPDATE SET option_id=excluded.option_id, created_at=excluded.created_at`,
+      args: [id, me, parsed.data.optionId, new Date().toISOString()]
+    });
+    const [post] = await attachPostExtras([{ id }], me);
+    res.json({ poll: post.poll });
+  } catch {
+    res.status(500).json({ error: "投票できませんでした。" });
   }
 });
 
@@ -413,7 +527,7 @@ api.get("/recommendations",requireAuth,async(req,res)=>{
       db.execute({sql:`${postSelect} WHERE p.user_id<>? AND p.created_at>=? AND ${VISIBLE_TO_SQL} ORDER BY ((SELECT COUNT(*) FROM likes l2 WHERE l2.post_id=p.id)+2*(SELECT COUNT(*) FROM comments c2 WHERE c2.post_id=p.id)) DESC, p.created_at DESC LIMIT 5`,args:[me,me,since,...visibleArgs(me)]}),
       db.execute({sql:"SELECT u.id,u.display_name,u.avatar_url,u.bio,(SELECT COUNT(*) FROM follows f WHERE f.followed_id=u.id) followers FROM users u WHERE u.id<>? AND NOT EXISTS(SELECT 1 FROM follows f2 WHERE f2.follower_id=? AND f2.followed_id=u.id) ORDER BY followers DESC, u.created_at DESC LIMIT 5",args:[me,me]})
     ]);
-    res.json({posts:posts.rows,users:users.rows});
+    res.json({posts:await attachPostExtras(posts.rows,me),users:users.rows});
   }catch{res.status(500).json({error:"おすすめを読み込めませんでした。"});}
 });
 
@@ -424,8 +538,7 @@ api.delete("/posts/:id",requireAuth,async(req,res)=>{
   if(!owned.rows.length)return res.status(404).json({error:"投稿が見つからないか、削除権限がありません。"});
   // Remove dependents explicitly so deletion does not rely on foreign-key cascades being enabled.
   await db.batch([
-    {sql:"DELETE FROM comments WHERE post_id=?",args:[id]},
-    {sql:"DELETE FROM likes WHERE post_id=?",args:[id]},
+    ...postCleanupStatements(id),
     {sql:"DELETE FROM posts WHERE id=? AND user_id=?",args:[id,req.user!.id]}
   ], "write");
   if (owned.rows[0].media_type === "video") await deleteVideoForPost(owned.rows[0].media_url === null ? null : String(owned.rows[0].media_url)).catch(() => undefined);

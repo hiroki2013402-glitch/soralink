@@ -20,5 +20,8 @@ export const config = {
   tokenUrl: process.env.SENNIN_TOKEN_URL || "https://sennin-account-api.xianrendesu.workers.dev/oauth/token",
   userinfoUrl: process.env.SENNIN_USERINFO_URL || "https://sennin-account-api.xianrendesu.workers.dev/oauth/userinfo",
   meUrl: process.env.SENNIN_ME_URL || "https://sennin-account-api.xianrendesu.workers.dev/api/v1/me",
-  scope: process.env.SENNIN_SCOPE || "profile email"
+  scope: process.env.SENNIN_SCOPE || "profile email",
+  // Admin area (/admin). ADMIN_PASSWORD enables it. ADMIN_SENNIN_ID (optional, the raw Sennin user id) limits admin rights to one account.
+  adminPassword: process.env.ADMIN_PASSWORD || "",
+  adminSenninId: process.env.ADMIN_SENNIN_ID || ""
 };
