@@ -313,7 +313,7 @@ button.x-detail-media{cursor:zoom-in}
 
 /* ---- Direct messages (Instagram-style inbox, notes, chat) ---- */
 .dm-shell{--dm-ink:#1c1e21;--dm-sub:#65676b;--dm-line:#dddfe2;--dm-soft:#f0f2f5;--dm-blue:#0866ff;--dm-bubble:#0866ff;display:grid;grid-template-columns:minmax(300px,360px) minmax(0,1fr);height:min(calc(100vh - 110px),800px);min-height:540px;background:#fff;border:0;border-radius:12px;box-shadow:0 1px 2px #00000014;overflow:hidden;color:var(--dm-ink);font-size:14px}
-.dm-inbox{display:flex;flex-direction:column;min-height:0;min-width:0;border-right:1px solid var(--dm-line);background:#fff}
+.dm-inbox{display:flex;flex-direction:column;min-height:0;min-width:0;overflow-x:hidden;border-right:1px solid var(--dm-line);background:#fff}
 .dm-inbox-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:18px 18px 10px 20px}
 .dm-inbox-head h2{margin:0;font-size:16px;font-weight:700;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .dm-icon-btn{display:inline-grid;place-items:center;width:34px;height:34px;border:0;border-radius:50%;background:transparent;color:var(--dm-ink);padding:0;flex-shrink:0}
@@ -336,8 +336,9 @@ button.x-detail-media{cursor:zoom-in}
 .dm-note-name{max-width:88px;font-size:12px;color:var(--dm-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dm-inbox-title{display:flex;align-items:center;padding:10px 20px 6px;border-top:1px solid #efefef}
 .dm-inbox-title strong{font-size:14px;font-weight:700}
-.dm-thread-list{list-style:none;margin:0;padding:4px 0 12px;overflow-y:auto;flex:1;min-height:0}
-.dm-thread{display:flex;align-items:center;gap:12px;width:100%;padding:8px 20px;border:0;background:transparent;text-align:left;color:var(--dm-ink);font:inherit;cursor:pointer;touch-action:pan-y;overscroll-behavior-x:contain}
+.dm-thread-list{list-style:none;margin:0;padding:4px 0 12px;overflow-x:hidden;overflow-y:auto;overscroll-behavior-x:none;flex:1;min-height:0}
+.dm-thread-list>li{width:100%;min-width:0;overflow:hidden}
+.dm-thread{display:flex;align-items:center;gap:12px;width:100%;min-width:0;max-width:100%;height:72px;padding:8px 20px;overflow:hidden;border:0;background:transparent;text-align:left;color:var(--dm-ink);font:inherit;cursor:pointer;touch-action:pan-y;overscroll-behavior-x:none}
 .dm-thread:hover{background:#f5f6f7}
 .dm-thread.is-active{background:#e7f3ff}
 .dm-thread-avatar{flex-shrink:0;display:grid;place-items:center}
@@ -451,7 +452,7 @@ button.x-detail-media{cursor:zoom-in}
   .dm-shell:not(.has-chat) .dm-pane{display:none}
   .dm-shell.has-chat .dm-inbox{display:none}
   .dm-inbox{border-right:0;min-height:70vh}
-  .dm-thread-list{overflow:visible}
+  .dm-thread-list{overflow-x:hidden;overflow-y:visible}
   .dm-inbox-head{padding:14px 16px 8px}
   .dm-back{display:inline-grid}
   .dm-chat-head{height:56px}
