@@ -127,3 +127,84 @@ as $$
 $$;
 
 revoke all on function public.dm_unread_counts(text) from public, anon, authenticated;
+
+-- Live messages (Realtime Broadcast on private topics "dm:user:<userId>").
+-- A user may join and send to a topic only when they share a conversation with that user.
+-- The check runs as a security definer function so it can read dm_members past the RLS above.
+create or replace function public.dm_shares_conversation(a text, b text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.dm_members x
+    join public.dm_members y on y.conversation_id = x.conversation_id
+    where x.user_id = a and y.user_id = b
+  );
+$$;
+
+revoke all on function public.dm_shares_conversation(text, text) from public, anon;
+grant execute on function public.dm_shares_conversation(text, text) to authenticated;
+
+drop policy if exists "dm_broadcast_select" on realtime.messages;
+create policy "dm_broadcast_select" on realtime.messages
+  for select to authenticated
+  using (
+    extension = 'broadcast'
+    and starts_with(realtime.topic(), 'dm:user:')
+    and (
+      substr(realtime.topic(), 9) = (auth.jwt() ->> 'sub')
+      or public.dm_shares_conversation(auth.jwt() ->> 'sub', substr(realtime.topic(), 9))
+    )
+  );
+
+drop policy if exists "dm_broadcast_insert" on realtime.messages;
+create policy "dm_broadcast_insert" on realtime.messages
+  for insert to authenticated
+  with check (
+    extension = 'broadcast'
+    and starts_with(realtime.topic(), 'dm:user:')
+    and (
+      substr(realtime.topic(), 9) = (auth.jwt() ->> 'sub')
+      or public.dm_shares_conversation(auth.jwt() ->> 'sub', substr(realtime.topic(), 9))
+    )
+  );
+
+-- Group chats: roles (owner, sub_admin, member), group name description and icon.
+alter table public.dm_members add column if not exists role text not null default 'member';
+do $$
+begin
+  alter table public.dm_members add constraint dm_members_role_check check (role in ('owner', 'sub_admin', 'member'));
+exception when duplicate_object then null;
+end $$;
+
+alter table public.dm_conversations add column if not exists description text;
+alter table public.dm_conversations add column if not exists icon_path text;
+do $$
+begin
+  alter table public.dm_conversations add constraint dm_description_length check (description is null or char_length(description) <= 200);
+exception when duplicate_object then null;
+end $$;
+
+-- Existing group chats: the creator becomes owner while still a member.
+update public.dm_members m set role = 'owner'
+from public.dm_conversations c
+where c.id = m.conversation_id and c.is_group and c.created_by = m.user_id and m.role = 'member'
+  and not exists (select 1 from public.dm_members o where o.conversation_id = m.conversation_id and o.role = 'owner');
+
+-- Groups whose creator has left: the longest-standing member becomes owner.
+update public.dm_members m set role = 'owner'
+from (
+  select distinct on (conversation_id) conversation_id, user_id
+  from public.dm_members
+  where conversation_id in (select id from public.dm_conversations where is_group)
+    and conversation_id not in (select conversation_id from public.dm_members where role = 'owner')
+  order by conversation_id, joined_at
+) first
+where m.conversation_id = first.conversation_id and m.user_id = first.user_id;
+
+-- At most one owner per group.
+create unique index if not exists dm_members_one_owner on public.dm_members (conversation_id) where role = 'owner';

@@ -62,7 +62,9 @@ export default function MessagesPage({ user, counts, selectedId, onOpenConversat
   // New messages change previews and ordering; new memberships add conversations. Reload, lightly debounced.
   useEffect(() => {
     let timer: number | undefined;
-    const off = onDmEvent(() => {
+    const off = onDmEvent(event => {
+      // Read receipts do not change the inbox.
+      if (event.type === "read") return;
       window.clearTimeout(timer);
       timer = window.setTimeout(() => void load(), 300);
     });
@@ -165,7 +167,9 @@ function ThreadRow({ conversation: c, me, unread, active, onOpen }: {
   return (
     <button type="button" className={`dm-thread ${isUnread ? "is-unread" : ""} ${active ? "is-active" : ""}`} onClick={onOpen}>
       <span className="dm-thread-avatar">
-        {c.is_group ? (
+        {c.is_group && c.icon_url ? (
+          <Avatar url={c.icon_url} name={titleOf(c, me)} />
+        ) : c.is_group ? (
           <span className="dm-group-avatar">
             <Avatar url={others[0]?.avatar_url ?? null} name={others[0]?.display_name ?? ""} />
             <Avatar url={others[1]?.avatar_url ?? null} name={others[1]?.display_name ?? ""} />

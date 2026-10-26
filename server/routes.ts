@@ -165,17 +165,106 @@ api.delete("/comments/:id", requireAuth, async (req,res) => {
   res.json({ok:true});
 });
 
-api.patch("/me/profile", requireAuth, async(req,res)=>{
-  const p=profileSchema.safeParse(req.body);
-  if(!p.success) return res.status(400).json({error:p.error.issues[0]?.message||"入力を確認してください。"});
+api.patch("/me/profile", requireAuth, async (req, res) => {
+  // Validate the complete profile payload before writing anything.
+  const parsed = profileSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    console.warn("[profile] validation failed", {
+      userId: req.user!.id,
+      field: issue?.path.join("."),
+      code: issue?.code
+    });
+    return res.status(400).json({
+      error: issue?.message || "入力内容を確認してください。",
+      code: "PROFILE_VALIDATION_FAILED"
+    });
+  }
+
+  const profile = parsed.data;
+  const userId = req.user!.id;
+
   try {
-    for (const value of [p.data.avatarUrl,p.data.coverUrl]) { if (value.startsWith("/api/media/")) { const owned=await db.execute({sql:"SELECT id FROM media_assets WHERE id=? AND user_id=?",args:[value.slice("/api/media/".length),req.user!.id]}); if(!owned.rows.length)return res.status(403).json({error:"自分がアップロードした画像のみ設定できます。"}); } }
-    const website=p.data.website.trim();
-    if(website && !/^https:\/\//i.test(website)) return res.status(400).json({error:"リンクはhttps://から入力してください。"});
-    await db.execute({sql:"UPDATE users SET display_name=?,bio=?,website=?,avatar_url=?,cover_url=? WHERE id=?",args:[p.data.displayName,p.data.bio,website||null,p.data.avatarUrl||null,p.data.coverUrl||null,req.user!.id]});
-    const r=await db.execute({sql:"SELECT id,display_name,email,avatar_url,cover_url,bio,website,created_at FROM users WHERE id=?",args:[req.user!.id]});
-    res.json({user:r.rows[0]});
-  } catch { res.status(500).json({error:"プロフィールを保存できませんでした。"}); }
+    // Only allow this user to select media they uploaded.
+    for (const [field, value] of [
+      ["avatarUrl", profile.avatarUrl],
+      ["coverUrl", profile.coverUrl]
+    ] as const) {
+      if (!value.startsWith("/api/media/")) continue;
+
+      const mediaId = value.slice("/api/media/".length);
+      const owned = await db.execute({
+        sql: "SELECT id FROM media_assets WHERE id = ? AND user_id = ?",
+        args: [mediaId, userId]
+      });
+
+      if (!owned.rows.length) {
+        return res.status(403).json({
+          error: "自分がアップロードした画像のみ設定できます。",
+          code: "PROFILE_MEDIA_NOT_OWNED",
+          field
+        });
+      }
+    }
+
+    const website = profile.website.trim();
+    if (website && !/^https:\/\//i.test(website)) {
+      return res.status(400).json({
+        error: "リンクはhttps://から入力してください。",
+        code: "PROFILE_INVALID_WEBSITE",
+        field: "website"
+      });
+    }
+
+    // Update only the authenticated user's row, never a client-supplied user ID.
+    const updated = await db.execute({
+      sql: "UPDATE users SET display_name = ?, bio = ?, website = ?, avatar_url = ?, cover_url = ? WHERE id = ?",
+      args: [
+        profile.displayName,
+        profile.bio,
+        website || null,
+        profile.avatarUrl || null,
+        profile.coverUrl || null,
+        userId
+      ]
+    });
+
+    // Detect a stale/deleted account rather than returning an undefined user.
+    if (updated.rowsAffected === 0) {
+      const exists = await db.execute({
+        sql: "SELECT id FROM users WHERE id = ?",
+        args: [userId]
+      });
+      if (!exists.rows.length) {
+        return res.status(401).json({
+          error: "アカウントを確認できません。再ログインしてください。",
+          code: "PROFILE_USER_NOT_FOUND"
+        });
+      }
+    }
+
+    const result = await db.execute({
+      sql: "SELECT id, display_name, email, avatar_url, cover_url, bio, website, created_at FROM users WHERE id = ?",
+      args: [userId]
+    });
+
+    if (!result.rows.length) {
+      throw new Error("Profile update completed but the user row could not be reloaded");
+    }
+
+    return res.json({ user: result.rows[0] });
+  } catch (error) {
+    // Keep detailed diagnostics on the server; do not expose DB details to clients.
+    console.error("[profile] save failed", {
+      userId,
+      errorName: error instanceof Error ? error.name : "UnknownError",
+      errorMessage: error instanceof Error ? error.message : String(error)
+    });
+    return res.status(500).json({
+      error: "プロフィールの保存に失敗しました。時間をおいて再試行してください。",
+      code: "PROFILE_SAVE_FAILED"
+    });
+  }
 });
 
 api.get("/users/search", requireAuth, async(req,res)=>{

@@ -3,14 +3,16 @@ import type { ChangeEvent, KeyboardEvent } from "react";
 import { ChevronLeft, ImagePlus, LoaderCircle, LogOut, MessageCircle } from "lucide-react";
 import Avatar from "../../components/Avatar";
 import { api } from "../../lib/api";
-import { onDmEvent } from "../../lib/dmRealtime";
+import { onDmEvent, prepareDmPeers, retractLiveDm, sendLiveDm, sendToPeers } from "../../lib/dmRealtime";
 import { errorMessage } from "../../lib/errors";
 import { optimizeImage } from "../../lib/images";
-import type { DmMember, DmMessage, User } from "../../types";
+import type { DmDetailConversation, DmMember, DmMessage, User } from "../../types";
+import GroupInfoSheet from "./GroupInfoSheet";
+import NewMessageSheet from "./NewMessageSheet";
 import { chatStamp, GROUP_GAP_MS, STAMP_GAP_MS } from "./dmFormat";
 
 type Detail = {
-  conversation: { id: string; is_group: boolean; title: string | null; members: DmMember[] };
+  conversation: DmDetailConversation;
   messages: DmMessage[];
   hasMore: boolean;
 };
@@ -57,7 +59,20 @@ function buildRows(messages: DmMessage[]): Row[] {
   return rows;
 }
 
-// One conversation: Instagram-style bubbles, text and photo messages, realtime updates.
+// How many other members had read this message. A member counts only if they were in the chat when it was sent.
+function readCount(message: DmMessage, members: DmMember[]) {
+  const sentAt = Date.parse(message.created_at);
+  return members.filter(p =>
+    p.id !== message.sender_id
+    && p.last_read_at
+    && Date.parse(p.last_read_at) >= sentAt
+    && (!p.joined_at || Date.parse(p.joined_at) <= sentAt)
+  ).length;
+}
+
+const isLater = (at: string, than: string | null | undefined) => !than || Date.parse(at) > Date.parse(than);
+
+// One conversation: Instagram-style bubbles, text and photo messages, realtime updates, read receipts and group settings.
 export default function ConversationPage({ user, conversationId, onBack, onCountsChanged, onNotice, onOpenProfile }: Props) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,12 +80,17 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   const [sending, setSending] = useState(false);
   const [sendingPhoto, setSendingPhoto] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [onlineIds, setOnlineIds] = useState<string[]>([]);
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const detailRef = useRef<Detail | null>(null);
+  const onlineRef = useRef<string[]>([]);
 
   useEffect(() => { detailRef.current = detail; }, [detail]);
+  useEffect(() => { onlineRef.current = onlineIds; }, [onlineIds]);
 
   const scrollBottom = useCallback(() => {
     const el = listRef.current;
@@ -87,20 +107,71 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     }
   }, [conversationId, onNotice]);
 
+  // Refreshes the header data (name, icon, members, roles) and keeps the messages already on screen.
+  const refreshConversation = useCallback(async () => {
+    try {
+      const fresh = await api<Detail>(`/dm/conversations/${encodeURIComponent(conversationId)}`);
+      setDetail(prev => (prev ? { ...prev, conversation: fresh.conversation } : fresh));
+    } catch (e) {
+      onNotice(errorMessage(e, "会話情報を読み込めませんでした"));
+    }
+  }, [conversationId, onNotice]);
+
+  // Lets the other members know the group changed, so their open chat and inbox reload.
+  const notifyGroup = useCallback(() => {
+    const others = (detailRef.current?.conversation.members ?? []).filter(m => m.id !== user.id).map(m => m.id);
+    if (others.length) void sendToPeers(others, "group", { conversationId });
+  }, [conversationId, user.id]);
+
+  const handleGroupChanged = useCallback(() => {
+    void refreshConversation();
+    notifyGroup();
+  }, [refreshConversation, notifyGroup]);
+
+  // Marks the chat read and tells online members when it happened, so their "既読" label updates at once.
   const markRead = useCallback(() => {
-    api(`/dm/conversations/${encodeURIComponent(conversationId)}/read`, { method: "POST" })
-      .then(() => onCountsChanged())
+    api<{ last_read_at?: string }>(`/dm/conversations/${encodeURIComponent(conversationId)}/read`, { method: "POST" })
+      .then(r => {
+        onCountsChanged();
+        if (!r.last_read_at) return;
+        const peers = (detailRef.current?.conversation.members ?? [])
+          .filter(m => m.id !== user.id && onlineRef.current.includes(m.id))
+          .map(m => m.id);
+        if (peers.length) void sendToPeers(peers, "read", { conversationId, userId: user.id, readAt: r.last_read_at });
+      })
       .catch(() => undefined);
-  }, [conversationId, onCountsChanged]);
+  }, [conversationId, onCountsChanged, user.id]);
 
   useEffect(() => {
     setLoading(true);
     void load().then(markRead);
   }, [load, markRead]);
 
-  // Realtime: append messages from this conversation. Reload if the sender is not yet in the member list.
+  // Realtime: append messages from this conversation, apply read receipts, and reload the header on group changes.
   useEffect(() => onDmEvent(event => {
-    if (event.type !== "message" || event.conversationId !== conversationId) return;
+    if (event.type === "read") {
+      if (event.conversationId !== conversationId) return;
+      setDetail(prev => prev ? {
+        ...prev,
+        conversation: {
+          ...prev.conversation,
+          members: prev.conversation.members.map(m =>
+            m.id === event.userId && isLater(event.readAt, m.last_read_at) ? { ...m, last_read_at: event.readAt } : m
+          )
+        }
+      } : prev);
+      return;
+    }
+    if (event.type === "group") {
+      if (event.conversationId === conversationId) void refreshConversation();
+      return;
+    }
+    if (event.conversationId !== conversationId) return;
+    if (event.type === "unsend") {
+      setDetail(prev => prev ? { ...prev, messages: prev.messages.filter(m => m.id !== event.messageId) } : prev);
+      return;
+    }
+    if (event.type !== "message") return;
     const incoming = fromRow(event.message);
     const current = detailRef.current;
     if (current && !current.conversation.members.some(m => m.id === incoming.sender_id)) {
@@ -111,7 +182,29 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
         : prev);
     }
     if (incoming.sender_id !== user.id) markRead();
-  }), [conversationId, load, markRead, user.id]);
+  }), [conversationId, load, markRead, refreshConversation, user.id]);
+
+  // Who is online in this conversation. Refreshed every 20 seconds; a send uses the latest answer.
+  const onlineKey = onlineIds.join(",");
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => {
+      api<{ online: string[] }>(`/dm/conversations/${encodeURIComponent(conversationId)}/presence`)
+        .then(r => { if (alive) setOnlineIds(r.online.filter(id => id !== user.id)); })
+        .catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 20_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [conversationId, user.id]);
+
+  // Join the recipients' live channels ahead of the first send.
+  useEffect(() => {
+    if (onlineKey) prepareDmPeers(onlineKey.split(","));
+  }, [onlineKey]);
 
   const messages = detail?.messages ?? [];
   const lastId = messages[messages.length - 1]?.id;
@@ -133,18 +226,48 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
       : prev);
   };
 
+  const removeMessage = (messageId: string) => {
+    setDetail(prev => prev && prev.messages.some(m => m.id === messageId)
+      ? { ...prev, messages: prev.messages.filter(m => m.id !== messageId) }
+      : prev);
+  };
+
+  // Online recipients receive the text over the socket before the database save. Offline recipients get the saved row as before.
   const sendText = async () => {
     const body = draft.trim();
     if (!body || sending) return;
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const recipients = (detail?.conversation.members ?? [])
+      .filter(m => m.id !== user.id && onlineIds.includes(m.id))
+      .map(m => m.id);
+
     setSending(true);
+    const shownLive = recipients.length > 0 && await sendLiveDm(
+      conversationId,
+      { id, conversation_id: conversationId, sender_id: user.id, created_at: createdAt, kind: "text", body },
+      recipients
+    );
+    if (shownLive) {
+      setDraft(v => (v === body ? "" : v));
+      appendMessage({ id, sender_id: user.id, created_at: createdAt, kind: "text", body, image_url: null });
+    }
+
     try {
       const r = await api<{ message: DmMessage }>(`/dm/conversations/${encodeURIComponent(conversationId)}/messages`, {
         method: "POST",
-        body: JSON.stringify({ body })
+        body: JSON.stringify({ id, body })
       });
-      setDraft("");
-      appendMessage(r.message);
+      if (!shownLive) {
+        setDraft(v => (v === body ? "" : v));
+        appendMessage(r.message);
+      }
     } catch (e) {
+      if (shownLive) {
+        removeMessage(id);
+        setDraft(v => (v ? v : body));
+        void retractLiveDm(conversationId, id, recipients);
+      }
       onNotice(errorMessage(e, "メッセージを送信できませんでした"));
     } finally {
       setSending(false);
@@ -182,6 +305,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     if (!confirm("このグループから退出しますか？")) return;
     try {
       await api(`/dm/conversations/${encodeURIComponent(conversationId)}/leave`, { method: "POST" });
+      notifyGroup();
       onCountsChanged();
       onBack();
     } catch (e) {
@@ -224,6 +348,9 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   const title = conversation.title || others.map(m => m.display_name).join("、") || "自分だけのチャット";
   const subtitle = conversation.is_group ? `${conversation.members.length}人のグループ` : "SoraLink";
   const partner = !conversation.is_group ? others[0] : undefined;
+  const avatarUrl = conversation.is_group ? (conversation.icon_url ?? null) : (partner?.avatar_url ?? null);
+  // Only the newest message I sent shows a read receipt, as in Instagram.
+  const lastMine = [...messages].reverse().find(m => m.sender_id === user.id);
 
   return (
     <section className="dm-pane">
@@ -232,11 +359,11 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
         <button
           type="button"
           className="dm-head-person"
-          onClick={() => partner && onOpenProfile(partner.id)}
-          disabled={!partner}
-          aria-label={partner ? `${partner.display_name}のプロフィールを開く` : undefined}
+          onClick={() => (conversation.is_group ? setInfoOpen(true) : partner && onOpenProfile(partner.id))}
+          disabled={!conversation.is_group && !partner}
+          aria-label={conversation.is_group ? "グループ情報を開く" : partner ? `${partner.display_name}のプロフィールを開く` : undefined}
         >
-          <Avatar url={partner?.avatar_url ?? null} name={title} size="small" />
+          <Avatar url={avatarUrl} name={title} size="small" />
           <span className="dm-head-text">
             <strong>{title}</strong>
             <small>{subtitle}</small>
@@ -256,11 +383,15 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
 
         {!hasMore && (
           <div className="dm-intro">
-            <Avatar url={partner?.avatar_url ?? null} name={title} size="large" />
+            <Avatar url={avatarUrl} name={title} size="large" />
             <strong>{title}</strong>
             <small>{conversation.is_group ? subtitle : `${title} · SoraLink`}</small>
+            {conversation.is_group && conversation.description && <p className="dm-intro-desc">{conversation.description}</p>}
             {partner && (
               <button type="button" className="dm-outline-btn" onClick={() => onOpenProfile(partner.id)}>プロフィールを見る</button>
+            )}
+            {conversation.is_group && (
+              <button type="button" className="dm-outline-btn" onClick={() => setInfoOpen(true)}>グループ情報</button>
             )}
           </div>
         )}
@@ -273,6 +404,8 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
           const mine = message.sender_id === user.id;
           const sender = people.get(message.sender_id);
           const isPhoto = message.kind === "image" && message.image_url;
+          const isReceiptTarget = mine && lastMine?.id === message.id;
+          const readers = isReceiptTarget ? readCount(message, conversation.members) : 0;
           return (
             <div key={row.key} className={`dm-msg ${mine ? "mine" : "theirs"} ${first ? "first" : ""} ${last ? "last" : ""}`}>
               {!mine && (
@@ -295,6 +428,14 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
                   </a>
                 ) : (
                   <p className="dm-bubble">{message.body}</p>
+                )}
+                {isReceiptTarget && (
+                  <small
+                    className={`dm-receipt ${readers > 0 ? "is-read" : ""}`}
+                    title={conversation.is_group && readers > 0 ? `${readers}人が既読` : undefined}
+                  >
+                    {readers === 0 ? "送信済み" : conversation.is_group ? `既読 ${readers}` : "既読"}
+                  </small>
                 )}
               </div>
             </div>
@@ -342,6 +483,27 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
           )}
         </div>
       </footer>
+
+      {infoOpen && conversation.is_group && (
+        <GroupInfoSheet
+          meId={user.id}
+          conversation={conversation}
+          onClose={() => setInfoOpen(false)}
+          onChanged={handleGroupChanged}
+          onAddMembers={() => setAdding(true)}
+          onLeave={() => void leave()}
+          onNotice={onNotice}
+        />
+      )}
+
+      {adding && conversation.is_group && (
+        <NewMessageSheet
+          addTo={{ conversationId, existingIds: conversation.members.map(m => m.id) }}
+          onClose={() => setAdding(false)}
+          onCreated={() => { setAdding(false); handleGroupChanged(); }}
+          onNotice={onNotice}
+        />
+      )}
     </section>
   );
 }

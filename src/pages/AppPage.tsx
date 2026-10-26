@@ -153,6 +153,21 @@ export default function App() {
     };
   }, [user?.id, refreshCounts]);
 
+  // Presence: tell the server this user is here. Sent while the tab is visible, so "online" means the app is open and in front.
+  useEffect(() => {
+    if (!user) return;
+    const beat = () => {
+      if (document.visibilityState === "visible") void api("/dm/presence", { method: "POST" }).catch(() => undefined);
+    };
+    beat();
+    const timer = window.setInterval(beat, 30000);
+    document.addEventListener("visibilitychange", beat);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", beat);
+    };
+  }, [user?.id]);
+
   // Initial load, and handle OAuth errors passed back in the query string.
   useEffect(() => {
     void load();
