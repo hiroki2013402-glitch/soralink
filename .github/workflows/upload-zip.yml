@@ -1,20 +1,18 @@
-name: Upload ZIP Contents to Main
+name: Upload ZIP Contents
 
 on:
   workflow_dispatch:
   push:
     paths:
       - "upload/**"
+    branches:
+      - main
 
 permissions:
   contents: write
 
-concurrency:
-  group: upload-zip-to-main
-  cancel-in-progress: false
-
 jobs:
-  upload:
+  extract-and-commit:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,7 +20,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
 
       - name: Find ZIP file
         id: zip
@@ -30,86 +27,73 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t files < <(
-            find upload -maxdepth 1 -type f -iname '*.zip' | sort
-          )
+          mapfile -t ZIP_FILES < <(find upload -maxdepth 1 -type f -iname '*.zip' | sort)
 
-          if [ "${#files[@]}" -ne 1 ]; then
-            echo "ERROR: upload folder must contain exactly one ZIP file."
-            echo "Found: ${#files[@]}"
-            printf '%s\n' "${files[@]}"
+          if [ "${#ZIP_FILES[@]}" -ne 1 ]; then
+            echo "uploadフォルダーにはZIPファイルを1つだけ配置してください。"
             exit 1
           fi
 
-          echo "file=${files[0]}" >> "$GITHUB_OUTPUT"
+          echo "file=${ZIP_FILES[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Validate ZIP
+      - name: Extract ZIP and remove top-level folder
         shell: bash
         env:
           ZIP_FILE: ${{ steps.zip.outputs.file }}
         run: |
           set -euo pipefail
 
-          python3 - <<'PY'
-          import os
+          mkdir -p /tmp/zip-source /tmp/zip-final
+
+          python3 - "$ZIP_FILE" <<'PY'
           import sys
           import zipfile
           from pathlib import PurePosixPath
 
-          zip_path = os.environ["ZIP_FILE"]
+          zip_path = sys.argv[1]
 
           with zipfile.ZipFile(zip_path) as z:
-              for item in z.infolist():
-                  name = item.filename
-
-                  if not name or "\\" in name:
-                      sys.exit(f"Invalid ZIP path: {name!r}")
-
+              for info in z.infolist():
+                  name = info.filename.replace("\\", "/")
                   path = PurePosixPath(name)
 
                   if path.is_absolute() or ".." in path.parts:
-                      sys.exit(f"Unsafe ZIP path: {name}")
+                      raise SystemExit(f"危険なZIPパスを検出しました: {name}")
 
                   if path.parts and ":" in path.parts[0]:
-                      sys.exit(f"Unsafe ZIP path: {name}")
+                      raise SystemExit(f"不正なZIPパスを検出しました: {name}")
 
-                  if item.file_size > 200 * 1024 * 1024:
-                      sys.exit(f"File too large: {name}")
-
-              if len(z.infolist()) > 10000:
-                  sys.exit("ZIP contains too many entries.")
-
-          print("ZIP validation passed.")
+              z.extractall("/tmp/zip-source")
           PY
 
-      - name: Extract ZIP contents
-        shell: bash
-        env:
-          ZIP_FILE: ${{ steps.zip.outputs.file }}
-        run: |
-          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import shutil
 
-          mkdir -p /tmp/upload-extracted
+          source = Path("/tmp/zip-source")
+          destination = Path("/tmp/zip-final")
 
-          python3 - <<'PY'
-          import os
-          import zipfile
+          items = list(source.iterdir())
 
-          zip_path = os.environ["ZIP_FILE"]
-          destination = "/tmp/upload-extracted"
+          # ZIP内にトップレベルのフォルダーが1つだけある場合、
+          # そのフォルダーの中身を取り出す。
+          if len(items) == 1 and items[0].is_dir():
+              root = items[0]
+          else:
+              root = source
 
-          with zipfile.ZipFile(zip_path) as z:
-              total_size = sum(item.file_size for item in z.infolist())
+          for item in root.iterdir():
+              target = destination / item.name
 
-              if total_size > 500 * 1024 * 1024:
-                  raise SystemExit("Extracted ZIP exceeds 500 MiB.")
+              if item.is_dir():
+                  shutil.copytree(item, target)
+              else:
+                  shutil.copy2(item, target)
 
-              z.extractall(destination)
-
-          print("ZIP extracted successfully.")
+          print("ZIPの最上位フォルダーを処理しました。")
           PY
 
-      - name: Copy files into repository
+      - name: Sync files to repository root
         shell: bash
         run: |
           set -euo pipefail
@@ -117,7 +101,8 @@ jobs:
           rsync -a --delete \
             --exclude='.git/' \
             --exclude='.github/' \
-            /tmp/upload-extracted/ ./
+            --exclude='upload/' \
+            /tmp/zip-final/ ./
 
       - name: Commit and push
         shell: bash
@@ -132,9 +117,9 @@ jobs:
             ':(exclude).github/**'
 
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "コミットする変更はありません。"
             exit 0
           fi
 
-          git commit -m "chore: update repository from upload ZIP"
+          git commit -m "Update files from uploaded ZIP"
           git push origin HEAD:main
