@@ -70,7 +70,7 @@ body{background:#f0f2f5;color:#1c1e21}
 
 /* Desktop navigation, faster media rendering, and repaired create-post layout */
 .main-layout{max-width:1440px;grid-template-columns:230px minmax(0,680px) 280px;gap:24px;align-items:start;padding:20px 24px 90px}
-.left-sidebar{grid-column:1;grid-row:1;position:sticky;top:78px;display:flex;flex-direction:column;gap:5px;padding:8px 0;min-width:0}
+.left-sidebar{grid-column:1;grid-row:1;position:fixed;top:78px;left:15px;width:230px;display:flex;flex-direction:column;gap:5px;padding:8px 0;min-width:0}
 .left-sidebar>button{position:relative;display:flex;align-items:center;gap:13px;width:100%;min-height:48px;padding:8px 13px;border:0;border-radius:10px;background:transparent;color:#1c1e21;text-align:left;font-size:14px;font-weight:600;transition:background .16s,transform .16s}
 .left-sidebar>button:hover{background:#e4e6eb;transform:translateX(2px)}
 .left-sidebar>button.selected{background:#e7f3ff;color:#0866ff}
@@ -104,7 +104,7 @@ body{background:#f0f2f5;color:#1c1e21}
 .media-frame img{height:auto;max-width:100%;object-fit:contain;content-visibility:auto}
 .media-frame video{height:auto;max-width:100%;object-fit:contain;background:#000}
 .avatar img{display:block}
-@media(max-width:1180px){.main-layout{grid-template-columns:200px minmax(0,700px);max-width:1000px;gap:20px}.left-sidebar{grid-column:1}.main-column{grid-column:2}.right-rail{display:none}}
+@media(max-width:1180px){.main-layout{grid-template-columns:200px minmax(0,700px);max-width:1000px;gap:20px}.left-sidebar{grid-column:1;width:200px}.main-column{grid-column:2}.right-rail{display:none}}
 @media(max-width:760px){.main-layout{display:block;padding:12px 0 88px}.left-sidebar{display:none}.main-column{width:100%;grid-column:auto}.page-panel:has(.facebook-composer){margin:0 10px 14px}.page-panel:has(.facebook-composer)>.page-heading{padding:17px 15px}.facebook-composer{padding:16px 13px!important}.feed-toolbar{padding:0 12px}.right-rail{display:none}}
 @media(max-width:420px){.facebook-composer .section-heading{align-items:flex-start}.facebook-composer .pill{font-size:11px}.facebook-composer .composer-footer .primary-button{width:100%}.facebook-composer .media-toggle button{font-size:12px}}
 
