@@ -1,0 +1,69 @@
+name: Move Project to Repository Root
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  move-project:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Move project files to root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE="soralink-c79593cd532a8ca428c9de850fb2d76d5b9ec154"
+
+          if [ ! -d "$SOURCE" ]; then
+            echo "エラー: $SOURCE フォルダーが見つかりません。"
+            exit 1
+          fi
+
+          # フォルダー直下のファイル・フォルダーをルートへ移動する
+          shopt -s dotglob nullglob
+          for item in "$SOURCE"/*; do
+            name="$(basename "$item")"
+
+            # Git管理情報やActions設定は上書きしない
+            if [ "$name" = ".git" ] || [ "$name" = ".github" ]; then
+              continue
+            fi
+
+            if [ -e "$name" ]; then
+              echo "エラー: ルートに同名のファイルまたはフォルダーがあります: $name"
+              echo "既存データを上書きしないため処理を中止しました。"
+              exit 1
+            fi
+
+            mv "$item" .
+          done
+
+          # 空になった移動元フォルダーを削除する
+          rmdir "$SOURCE" 2>/dev/null || true
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "コミットする変更はありません。"
+            exit 0
+          fi
+
+          git commit -m "Move project files to repository root"
+          git push origin HEAD:main
