@@ -1,0 +1,86 @@
+/* Motion for the chat: a new message rises in, reactions pop, and taps respond. Turned off for reduced-motion users. */
+
+.dm-msg.is-new .dm-bubble,
+.dm-msg.is-new .dm-photo,
+.dm-msg.is-new .dm-quote {
+  animation: dm-msg-in 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  transform-origin: bottom center;
+}
+.dm-msg.is-new.mine .dm-bubble,
+.dm-msg.is-new.mine .dm-photo {
+  transform-origin: bottom right;
+}
+@keyframes dm-msg-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+
+.dm-msg.is-new .dm-receipt,
+.dm-msg.is-new .dm-reactions {
+  animation: dm-fade 0.3s ease both;
+}
+
+.dm-reaction {
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.dm-reaction:active {
+  transform: scale(0.9);
+}
+.dm-reaction:not(:disabled) {
+  animation: dm-pop 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes dm-pop {
+  from { transform: scale(0.5); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.dm-sheet-reactions button {
+  transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.dm-sheet-reactions button:hover {
+  transform: scale(1.25);
+}
+.dm-sheet-reactions button:active {
+  transform: scale(0.92);
+}
+
+.dm-send-text {
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+.dm-send-text:not(:disabled):active {
+  transform: scale(0.92);
+}
+
+.dm-bubble {
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+.dm-msg.is-flash .dm-bubble {
+  animation: dm-flash 0.9s ease;
+}
+@keyframes dm-flash {
+  0%, 100% { transform: none; }
+  30% { transform: scale(1.03); }
+}
+
+.dm-first-hint {
+  animation: dm-fade 0.4s ease both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dm-msg.is-new .dm-bubble,
+  .dm-msg.is-new .dm-photo,
+  .dm-msg.is-new .dm-quote,
+  .dm-msg.is-new .dm-receipt,
+  .dm-msg.is-new .dm-reactions,
+  .dm-reaction,
+  .dm-msg.is-flash .dm-bubble,
+  .dm-first-hint {
+    animation: none;
+  }
+  .dm-sheet-reactions button,
+  .dm-send-text,
+  .dm-bubble,
+  .dm-reaction {
+    transition: none;
+  }
+}

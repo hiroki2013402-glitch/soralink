@@ -522,7 +522,7 @@ dm.post("/dm/messages/:id/reactions", requireAuth, async (req, res) => {
   }
 });
 
-// Notifies the other members of a conversation who are not online. Online members already see the message in the app.
+// Notifies every other member of the conversation on all of their subscribed devices.
 async function sendDmPush(conversationId: string, senderId: string, senderName: string, preview: string) {
   const members = await sb.from("dm_members").select("user_id").eq("conversation_id", conversationId).neq("user_id", senderId);
   if (members.error) return;
@@ -530,8 +530,7 @@ async function sendDmPush(conversationId: string, senderId: string, senderName: 
     recipients: (members.data ?? []).map((m: { user_id: string }) => String(m.user_id)),
     conversationId,
     senderName,
-    preview,
-    isOnline: uid => Date.now() - (lastHeartbeat.get(uid) ?? 0) < ONLINE_WINDOW_MS
+    preview
   });
 }
 

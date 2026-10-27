@@ -57,17 +57,18 @@ push.post("/push/unsubscribe", requireAuth, async (req, res) => {
   }
 });
 
-// Sends one notification to every subscribed device of the given users, skipping those who are online right now.
+// Sends one notification to every subscribed device of the given users.
+// Presence is not checked here: it is shared across all of a user's devices, so an open PC would otherwise silence the phone.
+// The service worker decides whether to show a sound-free banner when the app is already in front.
 // Subscriptions the push service reports as gone (404/410) are removed.
 export async function notifyDmRecipients(args: {
   recipients: string[];
   conversationId: string;
   senderName: string;
   preview: string;
-  isOnline: (userId: string) => boolean;
 }) {
   if (!pushEnabled) return;
-  const targets = args.recipients.filter(id => !args.isOnline(id));
+  const targets = args.recipients;
   if (!targets.length) return;
   try {
     const found = await db.execute({

@@ -2,6 +2,7 @@ import { ArrowLeft, Heart, LoaderCircle, MessageCircle, Share2, Trash2, X } from
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import Avatar from "../../components/Avatar";
+import RichText from "../../components/RichText";
 import VideoPlayer from "../../components/VideoPlayer";
 import { posterFor } from "../../lib/video";
 import { api } from "../../lib/api";
@@ -186,7 +187,7 @@ export function PostDetailPage({ postId, user, onBack, onProfile, onOpenImage, o
                         <button className="x-icon-button small" onClick={() => void removeComment(c.id)} aria-label="コメントを削除"><X size={14} /></button>
                       )}
                     </div>
-                    <p>{c.body}</p>
+                    <p><RichText text={c.body} /></p>
                   </div>
                 </li>
               ))}

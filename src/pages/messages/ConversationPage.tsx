@@ -2,7 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { ChangeEvent, KeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { ChevronLeft, CornerUpLeft, ImagePlus, LoaderCircle, LogOut, MessageCircle, Pencil, X } from "lucide-react";
 import Avatar from "../../components/Avatar";
-import { api } from "../../lib/api";
+import RichText from "../../components/RichText";
+import { api, withTimeout } from "../../lib/api";
 import { onDmEvent, prepareDmPeers, retractLiveDm, sendLiveDm, sendToPeers } from "../../lib/dmRealtime";
 import type { DmRow } from "../../lib/dmRealtime";
 import { errorMessage } from "../../lib/errors";
@@ -13,6 +14,7 @@ import NewMessageSheet from "./NewMessageSheet";
 import MessageMenu from "./MessageMenu";
 import { chatStamp, GROUP_GAP_MS, STAMP_GAP_MS } from "./dmFormat";
 import "./dm-actions.css";
+import "./dm-motion.css";
 
 type Detail = {
   conversation: DmDetailConversation;
@@ -37,7 +39,10 @@ const MAX_TEXT_LENGTH = 1000;
 // Holding a message this long opens its action sheet.
 const LONG_PRESS_MS = 450;
 // While the chat is open, it re-reads the newest page this often, as a safety net for missed realtime events.
-const RESYNC_EVERY_MS = 30_000;
+const RESYNC_EVERY_MS = 10_000;
+// A resync that has not finished by then is abandoned, so a stalled request cannot freeze later updates.
+const RESYNC_DEADLINE_MS = 8_000;
+
 
 // Realtime rows and API rows share this shape. Anything that is not kind "text" is a photo.
 function fromRow(row: DmRow): DmMessage {
@@ -141,6 +146,9 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   // Set when a long press opens the sheet, so the click that follows the release does not open the photo.
   const suppressClickRef = useRef(false);
   const resyncingRef = useRef(false);
+  const resyncStartedRef = useRef(0);
+  // Ids of messages that arrived or were sent while the chat was open. They animate in once.
+  const freshIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => { detailRef.current = detail; }, [detail]);
   useEffect(() => { onlineRef.current = onlineIds; }, [onlineIds]);
@@ -172,10 +180,15 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
 
   // Reloads the newest page and merges it in. Catches anything the realtime connection missed.
   const resync = useCallback(async () => {
-    if (resyncingRef.current) return;
+    // A resync still running past its deadline is treated as lost, so a stalled request cannot block the next one.
+    if (resyncingRef.current && Date.now() - resyncStartedRef.current < RESYNC_DEADLINE_MS) return;
     resyncingRef.current = true;
+    resyncStartedRef.current = Date.now();
     try {
-      const fresh = await api<Detail>(`/dm/conversations/${encodeURIComponent(conversationId)}`);
+      const fresh = await withTimeout(
+        api<Detail>(`/dm/conversations/${encodeURIComponent(conversationId)}`),
+        RESYNC_DEADLINE_MS
+      );
       const keep = pendingRef.current;
       setDetail(prev => (prev ? mergeDetail(prev, fresh, keep) : prev));
     } catch {
@@ -184,6 +197,17 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
       resyncingRef.current = false;
     }
   }, [conversationId]);
+
+  // Coming back to this chat (focus, or the app returning to the front) refreshes it straight away.
+  useEffect(() => {
+    const onBack = () => { if (document.visibilityState === "visible") void resync(); };
+    window.addEventListener("focus", onBack);
+    window.addEventListener("pageshow", onBack);
+    return () => {
+      window.removeEventListener("focus", onBack);
+      window.removeEventListener("pageshow", onBack);
+    };
+  }, [resync]);
 
   // Lets the other members know the group changed, so their open chat and inbox reload.
   const notifyGroup = useCallback(() => {
@@ -219,6 +243,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   }, [conversationId, onCountsChanged, user.id]);
 
   const appendMessage = useCallback((message: DmMessage) => {
+    freshIdsRef.current.add(message.id);
     setDetail(prev => prev && !prev.messages.some(m => m.id === message.id)
       ? { ...prev, messages: [...prev.messages, message] }
       : prev);
@@ -280,6 +305,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     }
     if (event.type !== "message") return;
     const incoming = fromRow(event.message);
+    freshIdsRef.current.add(incoming.id);
     const current = detailRef.current;
     if (current && !current.conversation.members.some(m => m.id === incoming.sender_id)) {
       void load();
@@ -648,6 +674,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
           }
           const { message, first, last } = row;
           const mine = message.sender_id === user.id;
+          const isNew = freshIdsRef.current.has(message.id);
           const sender = people.get(message.sender_id);
           const isPhoto = message.kind === "image" && message.image_url;
           const isReceiptTarget = mine && lastMine?.id === message.id;
@@ -655,7 +682,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
           const quoted = message.reply_to ? messageById.get(message.reply_to) : undefined;
           const groups = reactionGroups(message.reactions, user.id);
           return (
-            <div key={row.key} data-mid={message.id} className={`dm-msg ${mine ? "mine" : "theirs"} ${first ? "first" : ""} ${last ? "last" : ""}`}>
+            <div key={row.key} data-mid={message.id} className={`dm-msg ${mine ? "mine" : "theirs"} ${first ? "first" : ""} ${last ? "last" : ""} ${isNew ? "is-new" : ""}`}>
               {!mine && (
                 <span className="dm-msg-avatar" aria-hidden={!last}>
                   {last && <Avatar url={sender?.avatar_url ?? null} name={sender?.display_name ?? ""} size="small" />}
@@ -704,7 +731,14 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
                     onPointerCancel={cancelPress}
                     onContextMenu={e => { e.preventDefault(); setMenuMessage(message); }}
                   >
-                    {message.body}
+                    <span
+                      onClickCapture={e => {
+                        // A long press that opened the action sheet must not also open a link under the finger.
+                        if (suppressClickRef.current) { e.preventDefault(); e.stopPropagation(); suppressClickRef.current = false; }
+                      }}
+                    >
+                      <RichText text={message.body ?? ""} />
+                    </span>
                   </p>
                 )}
                 {groups.length > 0 && (

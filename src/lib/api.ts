@@ -55,3 +55,14 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new Error("サーバーの応答形式が正しくありません。");
   }
 }
+
+// Rejects if the promise has not settled in time. A request that hangs (common after iOS suspends the app) must not block later ones.
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("timeout")), ms);
+    promise.then(
+      value => { window.clearTimeout(timer); resolve(value); },
+      error => { window.clearTimeout(timer); reject(error); }
+    );
+  });
+}

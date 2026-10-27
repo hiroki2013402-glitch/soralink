@@ -25,6 +25,10 @@ const LIVE_ACK_TIMEOUT_MS = 1500;
 const JOIN_TIMEOUT_MS = 3000;
 // Resync signals that arrive close together (a reconnect, then the tab coming back) produce one reload.
 const RESYNC_DEBOUNCE_MS = 400;
+// After the app has been in the background this long, the socket is rebuilt rather than trusted.
+// iOS suspends WebSockets in the background and often reports them as open when they are not.
+const REBUILD_AFTER_HIDDEN_MS = 15_000;
+const REBUILD_COOLDOWN_MS = 2_000;
 
 const listeners = new Set<Listener>();
 let client: SupabaseClient | null = null;
@@ -40,6 +44,10 @@ let resyncTimer: number | undefined;
 let generation = 0;
 // True from the moment a channel reports a failure until it is subscribed again.
 let linkDown = false;
+// The user the current realtime session belongs to, so a rebuild can reconnect without the caller.
+let currentUserId: string | null = null;
+let hiddenSince = 0;
+let lastRebuildAt = 0;
 
 const topicFor = (userId: string) => `dm:user:${userId}`;
 const channelOptions = { config: { private: true, broadcast: { self: false } } };
@@ -74,18 +82,39 @@ function watchStatus(status: string) {
   }
 }
 
-// Phones suspend sockets while the app is in the background. Coming back to the foreground resyncs at once.
+// Phones suspend sockets while the app is in the background. Coming back to the foreground checks the socket,
+// rebuilds it if it may be dead, and resyncs the screens so anything sent while away appears at once.
+function onForeground() {
+  if (!currentUserId) return;
+  const away = hiddenSince ? Date.now() - hiddenSince : 0;
+  hiddenSince = 0;
+  // A session whose setup failed has no client yet; it is retried here.
+  const dead = !client || !client.realtime.isConnected();
+  const longAway = away >= REBUILD_AFTER_HIDDEN_MS;
+  if ((dead || longAway) && Date.now() - lastRebuildAt > REBUILD_COOLDOWN_MS) {
+    lastRebuildAt = Date.now();
+    void startDmRealtime(currentUserId);
+    return;
+  }
+  if (client) requestResync();
+}
+
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && client) requestResync();
+    if (document.visibilityState === "hidden") {
+      if (!hiddenSince) hiddenSince = Date.now();
+      return;
+    }
+    onForeground();
   });
-  window.addEventListener("online", () => {
-    if (client) requestResync();
-  });
+  // pageshow covers returning from the back/forward cache, which visibilitychange can miss on iOS.
+  window.addEventListener("pageshow", () => onForeground());
+  window.addEventListener("online", () => onForeground());
 }
 
 export function stopDmRealtime() {
   generation += 1;
+  currentUserId = null;
   window.clearTimeout(refreshTimer);
   window.clearTimeout(resyncTimer);
   refreshTimer = undefined;
@@ -108,6 +137,7 @@ export function stopDmRealtime() {
 // Subscribes to INSERTs on dm_messages and dm_members, and to live messages on this user's private topic.
 export async function startDmRealtime(userId: string) {
   stopDmRealtime();
+  currentUserId = userId;
   const current = generation;
   try {
     const config = await api<RealtimeConfig>("/dm/realtime-token");
@@ -154,6 +184,8 @@ export async function startDmRealtime(userId: string) {
       })
       .subscribe(status => watchStatus(String(status)));
     scheduleRefresh(current, config.expiresIn);
+    // Anything sent while the socket was down is loaded from the server, and screens pick up the new subscriptions.
+    requestResync();
   } catch {
     // Realtime is an enhancement. Counts still refresh by polling in the app shell, and open chats resync on their own timer.
   }

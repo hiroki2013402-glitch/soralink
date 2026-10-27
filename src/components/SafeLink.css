@@ -1,0 +1,21 @@
+.safe-link{color:#1d6cf2;font-weight:600;text-decoration:none;overflow-wrap:anywhere;word-break:break-all}
+.safe-link:hover{text-decoration:underline}
+.dm-msg.mine .safe-link{color:#fff;text-decoration:underline}
+
+.link-confirm-backdrop{position:fixed;inset:0;z-index:200;display:grid;place-items:center;padding:20px;background:rgba(7,21,43,.5);backdrop-filter:blur(2px);animation:link-confirm-fade .18s ease-out both}
+.link-confirm{width:min(360px,100%);padding:22px 20px 18px;border-radius:16px;background:#fff;color:#1c1e21;box-shadow:0 14px 44px rgba(0,0,0,.28);text-align:center;animation:link-confirm-pop .22s cubic-bezier(.2,.8,.2,1) both}
+.link-confirm-icon{display:inline-grid;place-items:center;width:44px;height:44px;margin-bottom:10px;border-radius:50%;background:#fff4e5;color:#e07a00}
+.link-confirm h3{margin:0 0 6px;font-size:16px;font-weight:800}
+.link-confirm p{margin:0 0 12px;font-size:13px;line-height:1.6;color:#65676b}
+.link-confirm-url{display:block;margin:0 0 18px;padding:9px 10px;border-radius:8px;background:#f0f2f5;font-size:12px;line-height:1.5;text-align:left;overflow-wrap:anywhere;word-break:break-all;max-height:84px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.link-confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.link-confirm-actions button{height:42px;border:0;border-radius:10px;font-size:14px;font-weight:700;transition:transform .15s,background .15s}
+.link-confirm-actions button:active{transform:scale(.97)}
+.link-confirm-cancel{background:#e4e6eb;color:#1c1e21}
+.link-confirm-cancel:hover{background:#d8dadf}
+.link-confirm-ok{background:#0866ff;color:#fff}
+.link-confirm-ok:hover{background:#075ce5}
+
+@keyframes link-confirm-fade{from{opacity:0}to{opacity:1}}
+@keyframes link-confirm-pop{from{opacity:0;transform:translateY(10px) scale(.96)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.link-confirm-backdrop,.link-confirm{animation:none}}

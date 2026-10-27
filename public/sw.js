@@ -1,4 +1,4 @@
-const CACHE_NAME = "soralink-shell-v2";
+const CACHE_NAME = "soralink-shell-v3";
 const SHELL = ["/", "/manifest.webmanifest", "/icons/icon.svg"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(SHELL)));
@@ -15,6 +15,7 @@ self.addEventListener("fetch", event => {
   event.respondWith(fetch(event.request).catch(() => caches.match(event.request).then(cached => cached || caches.match("/"))));
 });
 // Web Push: show a notification for a new direct message. The server sends JSON { title, body, url, tag }.
+// A notification is always shown (browsers require one per push). When the app is already on screen it is shown silently, without sound or vibration.
 self.addEventListener("push", event => {
   let data = {};
   try {
@@ -22,13 +23,18 @@ self.addEventListener("push", event => {
   } catch {
     data = { title: "SoraLink", body: event.data ? event.data.text() : "" };
   }
-  event.waitUntil(self.registration.showNotification(data.title || "SoraLink", {
-    body: data.body || "新着メッセージがあります",
-    icon: "/icons/android-icon-192x192.png",
-    tag: data.tag || "soralink",
-    renotify: true,
-    data: { url: data.url || "/page/messages" }
-  }));
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const appVisible = windows.some(client => client.visibilityState === "visible");
+    await self.registration.showNotification(data.title || "SoraLink", {
+      body: data.body || "新着メッセージがあります",
+      icon: "/icons/android-icon-192x192.png",
+      tag: data.tag || "soralink",
+      renotify: !appVisible,
+      silent: appVisible,
+      data: { url: data.url || "/page/messages" }
+    });
+  })());
 });
 
 // Tapping a notification opens the conversation: reuse an open window if there is one, otherwise open a new one.
