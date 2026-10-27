@@ -447,6 +447,7 @@ button.x-detail-media{cursor:zoom-in}
   .app-shell:has(.dm-shell) .topbar{display:none}
   .app-shell:has(.dm-shell.has-chat) .bottom-nav{display:none}
   .app-shell:has(.dm-shell.has-chat) .main-layout{padding:0}
+  .app-shell:has(.dm-shell.has-chat){min-height:0;height:100vh;height:100dvh;overflow:hidden}
   .dm-shell{grid-template-columns:minmax(0,1fr);height:auto;min-height:0;border:0;border-radius:0;overflow:visible}
   .dm-shell.has-chat{height:100dvh;overflow:hidden}
   .dm-shell:not(.has-chat) .dm-pane{display:none}

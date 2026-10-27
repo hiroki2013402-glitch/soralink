@@ -31,6 +31,7 @@ import { currentEndpoint, disablePush } from "../lib/push";
 import { loadPrefs, savePrefs } from "../lib/preferences";
 import type { Prefs } from "../lib/preferences";
 import SettingsPage from "./settings/SettingsPage";
+import StatusPage from "./status/StatusPage";
 import type { NotificationSettings } from "./settings/SettingsPage";
 import { parseRoute } from "../lib/route";
 import type { Route, Tab } from "../lib/route";
@@ -612,8 +613,11 @@ export default function App() {
               onEditProfile={() => void openProfile(user.id)}
               onLogout={() => void logout()}
               onNotice={tell}
+              onOpenStatus={() => go("/page/status")}
             />
           )}
+
+          {activeTab === "status" && <StatusPage />}
 
           {activeTab === "post" && route.postId && !route.image && (
             <PostDetailPage

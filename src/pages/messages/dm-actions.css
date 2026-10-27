@@ -1,11 +1,17 @@
 /* Message actions: long-press sheet, reply quote, reactions, edit state and composer mode bar.
    Colors come from the chat's --dm-* variables (set on .dm-shell). */
 
-.dm-msg .dm-bubble,
-.dm-msg .dm-photo {
+/* iOS starts its own long-press actions (text selection, link preview, image save menu) and cancels the
+   press that opens the action sheet. Turn them off for everything inside a message row. Links and taps still work. */
+.dm-msg,
+.dm-msg * {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
+  -webkit-user-drag: none;
+}
+.dm-msg .dm-photo img {
+  pointer-events: none;
 }
 .dm-msg.is-flash .dm-bubble,
 .dm-msg.is-flash .dm-photo img {
@@ -121,6 +127,8 @@
   position: fixed;
   inset: 0;
   z-index: 60;
+  overscroll-behavior: contain;
+  touch-action: none;
   display: flex;
   align-items: flex-end;
   justify-content: center;

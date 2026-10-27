@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ChangeEvent, KeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { ChevronLeft, CornerUpLeft, ImagePlus, LoaderCircle, LogOut, MessageCircle, Pencil, X } from "lucide-react";
 import Avatar from "../../components/Avatar";
@@ -530,6 +531,14 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     window.setTimeout(() => el.classList.remove("is-flash"), 1000);
   };
 
+  // iOS keeps the page scrolled up while the keyboard is open. When it closes, that leaves an empty strip under the composer.
+  const resetViewportAfterKeyboard = () => {
+    window.setTimeout(() => {
+      window.scrollTo(0, 0);
+      document.scrollingElement?.scrollTo(0, 0);
+    }, 50);
+  };
+
   // Long press (touch or mouse) on a message opens its action sheet. Moving the finger cancels it, so scrolling still works.
   const cancelPress = () => {
     window.clearTimeout(pressRef.current.timer);
@@ -851,6 +860,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
               aria-label="メッセージ"
               onChange={e => setDraft(e.target.value)}
               onKeyDown={onInputKey}
+              onBlur={resetViewportAfterKeyboard}
             />
             {draft.trim() && (
               <button type="button" className="dm-send-text" onClick={() => void sendText()} disabled={sending}>
@@ -861,7 +871,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
         </footer>
       </div>
 
-      {menuMessage && (
+      {menuMessage && createPortal(
         <MessageMenu
           message={menuMessage}
           mine={menuMessage.sender_id === user.id}
@@ -871,7 +881,8 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
           onCopy={() => void copyMessage(menuMessage)}
           onEdit={() => startEdit(menuMessage)}
           onUnsend={() => void unsend(menuMessage)}
-        />
+        />,
+        document.body
       )}
 
       {infoOpen && conversation.is_group && (

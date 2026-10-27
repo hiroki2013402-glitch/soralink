@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { BellRing, LogOut, Monitor, PenLine, ShieldCheck, Smartphone } from "lucide-react";
+import { Activity, BellRing, ChevronRight, LogOut, Monitor, PenLine, ShieldCheck, Smartphone } from "lucide-react";
 import Avatar from "../../components/Avatar";
 import { handleOf } from "../../lib/format";
 import { disablePush, enablePush, currentEndpoint, needsHomeScreen, pushSupported } from "../../lib/push";
@@ -19,6 +19,7 @@ type Props = {
   onEditProfile: () => void;
   onLogout: () => void;
   onNotice: (text: string) => void;
+  onOpenStatus: () => void;
 };
 
 // One labelled switch. The label and hint explain what the choice changes.
@@ -111,7 +112,7 @@ function ThisDeviceNotifications({ onNotice }: { onNotice: (text: string) => voi
 }
 
 // The settings screen: account, notifications, display. Account data itself is managed by the sign-in service.
-export default function SettingsPage({ user, settings, prefs, onChangeSettings, onChangePrefs, onEditProfile, onLogout, onNotice }: Props) {
+export default function SettingsPage({ user, settings, prefs, onChangeSettings, onChangePrefs, onEditProfile, onLogout, onNotice, onOpenStatus }: Props) {
   const loaded = settings !== null;
   return (
     <section className="settings-page">
@@ -182,6 +183,18 @@ export default function SettingsPage({ user, settings, prefs, onChangeSettings, 
           checked={prefs.reduceMotion}
           onChange={value => onChangePrefs({ reduceMotion: value })}
         />
+      </Section>
+
+      <Section icon={<Activity size={16} />} title="サービス">
+        <div className="settings-row static">
+          <button type="button" className="settings-link" onClick={onOpenStatus}>
+            <span className="settings-link-text">
+              <strong>サービス稼働状況</strong>
+              <small>サービスと動画の保存先が使える状態か確認できます。</small>
+            </span>
+            <ChevronRight size={18} />
+          </button>
+        </div>
       </Section>
 
       <Section icon={<ShieldCheck size={16} />} title="情報">

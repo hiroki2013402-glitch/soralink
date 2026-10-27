@@ -1,10 +1,10 @@
 // Client-side routes. Paths: /page/<tab>, /page/post/<id>, /page/post/<id>/image, /page/messages/<conversationId>
 
-export type Tab = "home" | "search" | "messages" | "create" | "notifications" | "profile" | "settings" | "post";
+export type Tab = "home" | "search" | "messages" | "create" | "notifications" | "profile" | "settings" | "status" | "post";
 export type Route = { tab: Tab; postId?: string; image?: boolean; conversationId?: string };
 
 // Tabs that appear in the navigation (the "post" view is opened from feeds, not the menu).
-export const TABS: Tab[] = ["home", "search", "messages", "create", "notifications", "profile", "settings"];
+export const TABS: Tab[] = ["home", "search", "messages", "create", "notifications", "profile", "settings", "status"];
 
 export const TAB_TITLES: Record<Tab, string> = {
   home: "ホーム",
@@ -14,6 +14,7 @@ export const TAB_TITLES: Record<Tab, string> = {
   notifications: "通知",
   profile: "マイページ",
   settings: "設定",
+  status: "サービス稼働状況",
   post: "投稿"
 };
 

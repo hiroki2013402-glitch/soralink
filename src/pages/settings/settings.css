@@ -31,6 +31,12 @@
 
 .settings-row.static{justify-content:flex-start}
 
+.settings-link{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:0;border:0;background:transparent;color:#1c1e21;text-align:left;cursor:pointer}
+.settings-link:hover .settings-link-text strong{color:#0866ff}
+.settings-link-text{display:flex;flex-direction:column;gap:3px;min-width:0}
+.settings-link-text strong{font-size:14px;font-weight:700}
+.settings-link-text small{font-size:12px;line-height:1.6;color:#65676b}
+
 @media (prefers-reduced-motion:reduce){
   .settings-page,.settings-switch,.settings-switch span{animation:none;transition:none}
 }
