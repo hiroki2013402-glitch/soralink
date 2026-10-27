@@ -14,3 +14,33 @@ self.addEventListener("fetch", event => {
   if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
   event.respondWith(fetch(event.request).catch(() => caches.match(event.request).then(cached => cached || caches.match("/"))));
 });
+// Web Push: show a notification for a new direct message. The server sends JSON { title, body, url, tag }.
+self.addEventListener("push", event => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = { title: "SoraLink", body: event.data ? event.data.text() : "" };
+  }
+  event.waitUntil(self.registration.showNotification(data.title || "SoraLink", {
+    body: data.body || "新着メッセージがあります",
+    icon: "/icons/android-icon-192x192.png",
+    tag: data.tag || "soralink",
+    renotify: true,
+    data: { url: data.url || "/page/messages" }
+  }));
+});
+
+// Tapping a notification opens the conversation: reuse an open window if there is one, otherwise open a new one.
+self.addEventListener("notificationclick", event => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || "/page/messages", self.location.origin).href;
+  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(windows => {
+    for (const client of windows) {
+      if (client.url.startsWith(self.location.origin) && "focus" in client) {
+        return client.navigate(target).catch(() => undefined).then(() => client.focus());
+      }
+    }
+    return self.clients.openWindow(target);
+  }));
+});

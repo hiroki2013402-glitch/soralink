@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
+import compression from "compression";
 import helmet from "helmet";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -12,6 +13,7 @@ import { registerOAuthRoutes } from "./oauth.js";
 import { api } from "./routes.js";
 import { admin } from "./admin.js";
 import { dm } from "./dm.js";
+import { push } from "./push.js";
 import { videos } from "./videos.js";
 import { initializeVideoDatabase, isVideoDatabaseReady } from "./videoDb.js";
 
@@ -40,6 +42,8 @@ app.use(helmet({
   referrerPolicy: { policy: "strict-origin-when-cross-origin" }
 }));
 app.use(cors({ origin: config.appOrigin, credentials: true }));
+// Gzip/deflate for JSON, HTML and JS. Images are already compressed and are skipped by the default filter.
+app.use(compression());
 app.use(express.json({ limit: "32kb", strict: true }));
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -67,9 +71,13 @@ function rateLimit(limit: number, windowMs: number) {
   };
 }
 app.use("/api/auth", rateLimit(30, 60_000));
+// Image and icon bytes are fetched once per picture by the browser, and a feed can show many of them.
+// They are not counted against the per-minute read budget, or a busy feed would lose its own pictures.
+const BINARY_READ = /^\/(media\/[0-9a-f-]{36}|dm\/messages\/[0-9a-f-]{36}\/image|dm\/conversations\/[0-9a-f-]{36}\/icon)(\?|$)/i;
 app.use("/api", (req, res, next) => {
   if (req.method === "PUT" && /^\/media\/video\/[0-9a-f-]{36}\/chunk\/\d+$/i.test(req.path)) return rateLimit(1200, 60_000)(req, res, next);
-  return req.method === "GET" ? rateLimit(180, 60_000)(req, res, next) : rateLimit(60, 60_000)(req, res, next);
+  if (req.method === "GET" && BINARY_READ.test(req.path)) return next();
+  return req.method === "GET" ? rateLimit(300, 60_000)(req, res, next) : rateLimit(60, 60_000)(req, res, next);
 });
 app.use(cookieParser());
 
@@ -82,12 +90,15 @@ app.get("/api/health", (_req, res) => res.json({
 registerOAuthRoutes(app);
 app.use("/api", admin);
 app.use("/api", dm);
+app.use("/api", push);
 app.use("/api", videos);
 app.use("/api", api);
 
 const clientBuildDir = path.join(projectRoot, "dist");
 const clientIndex = path.join(clientBuildDir, "index.html");
 if (existsSync(clientIndex)) {
+  // Vite names bundles with a content hash, so they can be cached for a year.
+  app.use("/assets", express.static(path.join(clientBuildDir, "assets"), { immutable: true, maxAge: "365d" }));
   app.use(express.static(clientBuildDir, { index: false, maxAge: "1h" }));
   app.get("*", (req, res, next) => {
     if (req.path === "/api" || req.path.startsWith("/api/")) return next();

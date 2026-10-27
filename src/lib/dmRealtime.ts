@@ -2,13 +2,19 @@ import { createClient } from "@supabase/supabase-js";
 import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import { api } from "./api";
 
-export type DmRow = { id: string; conversation_id: string; sender_id: string; created_at: string; kind?: string | null; body?: string | null };
+export type DmRow = { id: string; conversation_id: string; sender_id: string; created_at: string; kind?: string | null; body?: string | null; reply_to?: string | null };
+export type DmReactionEntry = { emoji: string; user_id: string };
 export type DmEvent =
   | { type: "message"; conversationId: string; message: DmRow }
   | { type: "membership"; conversationId: string }
   | { type: "unsend"; conversationId: string; messageId: string }
+  | { type: "edit"; conversationId: string; messageId: string; body: string; editedAt: string }
+  | { type: "react"; conversationId: string; messageId: string; reactions: DmReactionEntry[] }
   | { type: "read"; conversationId: string; userId: string; readAt: string }
-  | { type: "group"; conversationId: string };
+  | { type: "group"; conversationId: string }
+  // Sent when the connection comes back after a drop, and when the app returns to the foreground.
+  // Events sent while disconnected are not replayed, so screens reload what they may have missed.
+  | { type: "resync" };
 
 type Listener = (event: DmEvent) => void;
 type RealtimeConfig = { url: string; anonKey: string; token: string; expiresIn: number };
@@ -17,6 +23,8 @@ type RealtimeConfig = { url: string; anonKey: string; token: string; expiresIn: 
 const LIVE_ACK_TIMEOUT_MS = 1500;
 // How long to wait for a recipient's channel to join before treating that person as unreachable.
 const JOIN_TIMEOUT_MS = 3000;
+// Resync signals that arrive close together (a reconnect, then the tab coming back) produce one reload.
+const RESYNC_DEBOUNCE_MS = 400;
 
 const listeners = new Set<Listener>();
 let client: SupabaseClient | null = null;
@@ -27,8 +35,11 @@ let ownChannel: RealtimeChannel | null = null;
 // Private topics of people we send to, joined on demand and reused.
 let peerChannels = new Map<string, Promise<RealtimeChannel | null>>();
 let refreshTimer: number | undefined;
+let resyncTimer: number | undefined;
 // Bumped on every start/stop so a slow start cannot attach a stale channel after a newer start or a stop.
 let generation = 0;
+// True from the moment a channel reports a failure until it is subscribed again.
+let linkDown = false;
 
 const topicFor = (userId: string) => `dm:user:${userId}`;
 const channelOptions = { config: { private: true, broadcast: { self: false } } };
@@ -42,10 +53,44 @@ function emit(event: DmEvent) {
   listeners.forEach(listener => listener(event));
 }
 
+// Coalesces bursts of resync signals into one trailing event.
+function requestResync() {
+  if (resyncTimer !== undefined) return;
+  resyncTimer = window.setTimeout(() => {
+    resyncTimer = undefined;
+    emit({ type: "resync" });
+  }, RESYNC_DEBOUNCE_MS);
+}
+
+// Tracks a channel's state. Coming back up after a failure asks every screen to resync.
+function watchStatus(status: string) {
+  if (status === "SUBSCRIBED") {
+    if (linkDown) {
+      linkDown = false;
+      requestResync();
+    }
+  } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+    linkDown = true;
+  }
+}
+
+// Phones suspend sockets while the app is in the background. Coming back to the foreground resyncs at once.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && client) requestResync();
+  });
+  window.addEventListener("online", () => {
+    if (client) requestResync();
+  });
+}
+
 export function stopDmRealtime() {
   generation += 1;
   window.clearTimeout(refreshTimer);
+  window.clearTimeout(resyncTimer);
   refreshTimer = undefined;
+  resyncTimer = undefined;
+  linkDown = false;
   const old = client;
   if (old) {
     if (channel) void old.removeChannel(channel);
@@ -80,7 +125,7 @@ export async function startDmRealtime(userId: string) {
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "dm_members" }, payload => {
         emit({ type: "membership", conversationId: String(payload.new.conversation_id) });
       })
-      .subscribe();
+      .subscribe(status => watchStatus(String(status)));
     ownChannel = supabase
       .channel(topicFor(userId), channelOptions)
       .on("broadcast", { event: "message" }, ({ payload }) => {
@@ -91,6 +136,14 @@ export async function startDmRealtime(userId: string) {
         const p = payload as { conversationId: string; messageId: string };
         emit({ type: "unsend", conversationId: p.conversationId, messageId: p.messageId });
       })
+      .on("broadcast", { event: "edit" }, ({ payload }) => {
+        const p = payload as { conversationId: string; messageId: string; body: string; editedAt: string };
+        emit({ type: "edit", conversationId: p.conversationId, messageId: p.messageId, body: p.body, editedAt: p.editedAt });
+      })
+      .on("broadcast", { event: "react" }, ({ payload }) => {
+        const p = payload as { conversationId: string; messageId: string; reactions: DmReactionEntry[] };
+        emit({ type: "react", conversationId: p.conversationId, messageId: p.messageId, reactions: p.reactions });
+      })
       .on("broadcast", { event: "read" }, ({ payload }) => {
         const p = payload as { conversationId: string; userId: string; readAt: string };
         emit({ type: "read", conversationId: p.conversationId, userId: p.userId, readAt: p.readAt });
@@ -99,10 +152,10 @@ export async function startDmRealtime(userId: string) {
         const p = payload as { conversationId: string };
         emit({ type: "group", conversationId: p.conversationId });
       })
-      .subscribe();
+      .subscribe(status => watchStatus(String(status)));
     scheduleRefresh(current, config.expiresIn);
   } catch {
-    // Realtime is an enhancement. Counts still refresh by polling in the app shell.
+    // Realtime is an enhancement. Counts still refresh by polling in the app shell, and open chats resync on their own timer.
   }
 }
 
@@ -133,6 +186,7 @@ function peerChannel(userId: string): Promise<RealtimeChannel | null> {
       } else if (state === "CHANNEL_ERROR" || state === "TIMED_OUT" || state === "CLOSED") {
         window.clearTimeout(timer);
         if (!settled) { settled = true; resolve(null); }
+        // A channel that closes after joining is dropped, so the next send joins a fresh one.
         drop();
       }
     });
@@ -167,7 +221,8 @@ export async function retractLiveDm(conversationId: string, messageId: string, r
   await Promise.all(recipientIds.map(id => sendTo(id, "unsend", { conversationId, messageId })));
 }
 
-// Tells other members about a read receipt or a group change. Members who are offline catch up when they load.
+// Tells other members about a read receipt, an edit, a reaction, an unsend or a group change.
+// Members who are offline catch up on their next resync.
 export function sendToPeers(recipientIds: string[], event: string, payload: object) {
   return Promise.all(recipientIds.map(id => sendTo(id, event, payload)));
 }

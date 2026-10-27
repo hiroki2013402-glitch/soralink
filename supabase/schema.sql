@@ -208,3 +208,19 @@ where m.conversation_id = first.conversation_id and m.user_id = first.user_id;
 
 -- At most one owner per group.
 create unique index if not exists dm_members_one_owner on public.dm_members (conversation_id) where role = 'owner';
+
+-- Replies, edits and reactions. Safe to re-run.
+-- reply_to points at the message being replied to (cleared if that message is unsent); edited_at is set when a text message is edited.
+alter table public.dm_messages add column if not exists reply_to uuid references public.dm_messages(id) on delete set null;
+alter table public.dm_messages add column if not exists edited_at timestamptz;
+
+-- One row per (message, user, emoji). Removed with the message. Only the server (service role) reads and writes it.
+create table if not exists public.dm_reactions (
+  message_id uuid not null references public.dm_messages(id) on delete cascade,
+  user_id text not null,
+  emoji text not null check (char_length(emoji) between 1 and 16),
+  created_at timestamptz not null default now(),
+  primary key (message_id, user_id, emoji)
+);
+alter table public.dm_reactions enable row level security;
+revoke all on public.dm_reactions from anon, authenticated;

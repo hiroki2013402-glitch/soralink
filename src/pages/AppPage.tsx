@@ -27,6 +27,7 @@ import type { NewPost } from "../components/CreatePost";
 import { api } from "../lib/api";
 import { optimizeImage } from "../lib/images";
 import { errorMessage } from "../lib/errors";
+import { disablePush } from "../lib/push";
 import { parseRoute } from "../lib/route";
 import type { Route, Tab } from "../lib/route";
 import type { Announcement, Notice, Person, Post, SearchResults, User } from "../types";
@@ -381,6 +382,8 @@ export default function App() {
 
   const logout = async () => {
     try {
+      // Stop notifications for this account on this device first, but never wait long for it.
+      await Promise.race([disablePush(), new Promise(resolve => window.setTimeout(resolve, 1500))]);
       await api("/auth/logout", { method: "POST" });
       setUser(null);
       go("/page/home", true);

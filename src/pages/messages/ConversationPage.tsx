@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, KeyboardEvent } from "react";
-import { ChevronLeft, ImagePlus, LoaderCircle, LogOut, MessageCircle } from "lucide-react";
+import type { ChangeEvent, KeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
+import { ChevronLeft, CornerUpLeft, ImagePlus, LoaderCircle, LogOut, MessageCircle, Pencil, X } from "lucide-react";
 import Avatar from "../../components/Avatar";
 import { api } from "../../lib/api";
 import { onDmEvent, prepareDmPeers, retractLiveDm, sendLiveDm, sendToPeers } from "../../lib/dmRealtime";
+import type { DmRow } from "../../lib/dmRealtime";
 import { errorMessage } from "../../lib/errors";
 import { optimizeImage } from "../../lib/images";
-import type { DmDetailConversation, DmMember, DmMessage, User } from "../../types";
+import type { DmDetailConversation, DmMember, DmMessage, DmReaction, User } from "../../types";
 import GroupInfoSheet from "./GroupInfoSheet";
 import NewMessageSheet from "./NewMessageSheet";
+import MessageMenu from "./MessageMenu";
 import { chatStamp, GROUP_GAP_MS, STAMP_GAP_MS } from "./dmFormat";
+import "./dm-actions.css";
 
 type Detail = {
   conversation: DmDetailConversation;
@@ -31,9 +34,13 @@ type Row =
   | { kind: "message"; key: string; message: DmMessage; first: boolean; last: boolean };
 
 const MAX_TEXT_LENGTH = 1000;
+// Holding a message this long opens its action sheet.
+const LONG_PRESS_MS = 450;
+// While the chat is open, it re-reads the newest page this often, as a safety net for missed realtime events.
+const RESYNC_EVERY_MS = 30_000;
 
 // Realtime rows and API rows share this shape. Anything that is not kind "text" is a photo.
-function fromRow(row: { id: string; sender_id: string; created_at: string; kind?: string | null; body?: string | null }): DmMessage {
+function fromRow(row: DmRow): DmMessage {
   const isText = row.kind === "text";
   return {
     id: row.id,
@@ -41,7 +48,10 @@ function fromRow(row: { id: string; sender_id: string; created_at: string; kind?
     created_at: row.created_at,
     kind: isText ? "text" : "image",
     body: isText ? (row.body ?? "") : null,
-    image_url: isText ? null : `/api/dm/messages/${row.id}/image`
+    image_url: isText ? null : `/api/dm/messages/${row.id}/image`,
+    reply_to: row.reply_to ?? null,
+    edited_at: null,
+    reactions: []
   };
 }
 
@@ -72,7 +82,39 @@ function readCount(message: DmMessage, members: DmMember[]) {
 
 const isLater = (at: string, than: string | null | undefined) => !than || Date.parse(at) > Date.parse(than);
 
-// One conversation: Instagram-style bubbles, text and photo messages, realtime updates, read receipts and group settings.
+// The short text shown for a message in a reply quote or the composer bar.
+const quoteText = (m: DmMessage) => (m.kind === "image" ? "写真" : (m.body ?? "").slice(0, 40));
+
+// Reactions grouped by emoji, with how many people chose each and whether the viewer is one of them.
+function reactionGroups(reactions: DmReaction[] | undefined, myId: string) {
+  const groups = new Map<string, { emoji: string; count: number; mine: boolean }>();
+  for (const r of reactions ?? []) {
+    const group = groups.get(r.emoji) ?? { emoji: r.emoji, count: 0, mine: false };
+    group.count += 1;
+    if (r.user_id === myId) group.mine = true;
+    groups.set(r.emoji, group);
+  }
+  return [...groups.values()];
+}
+
+// Brings the open chat up to date with the server: new and edited messages, reactions, and removed (unsent) ones.
+// Only the newest page is compared, so older pages already on screen are kept as they are.
+// Messages still being sent (keepIds) are kept until the server confirms them.
+function mergeDetail(prev: Detail, fresh: Detail, keepIds: Set<string>): Detail {
+  const windowOldest = fresh.messages[0]?.created_at;
+  const oldest = windowOldest ? Date.parse(windowOldest) : -Infinity;
+  const freshIds = new Set(fresh.messages.map(m => m.id));
+  const kept = prev.messages.filter(m => {
+    if (freshIds.has(m.id)) return false;
+    if (keepIds.has(m.id)) return true;
+    return Date.parse(m.created_at) < oldest;
+  });
+  const olderLoaded = prev.messages.some(m => Date.parse(m.created_at) < oldest);
+  const messages = [...kept, ...fresh.messages].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  return { conversation: fresh.conversation, messages, hasMore: olderLoaded ? prev.hasMore : fresh.hasMore };
+}
+
+// One conversation: Instagram-style bubbles, text and photo messages, replies, edits, reactions, unsend, realtime updates, read receipts and group settings.
 export default function ConversationPage({ user, conversationId, onBack, onCountsChanged, onNotice, onOpenProfile }: Props) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -83,11 +125,22 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   const [onlineIds, setOnlineIds] = useState<string[]>([]);
   const [infoOpen, setInfoOpen] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [replyTo, setReplyTo] = useState<DmMessage | null>(null);
+  const [editing, setEditing] = useState<DmMessage | null>(null);
+  const [menuMessage, setMenuMessage] = useState<DmMessage | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const detailRef = useRef<Detail | null>(null);
   const onlineRef = useRef<string[]>([]);
+  // Ids of messages this browser is still sending. A resync must not drop them before the server confirms.
+  const pendingRef = useRef<Set<string>>(new Set());
+  // The text the user had typed before starting an edit, put back when the edit is cancelled.
+  const stashRef = useRef("");
+  const pressRef = useRef<{ x: number; y: number; timer?: number }>({ x: 0, y: 0 });
+  // Set when a long press opens the sheet, so the click that follows the release does not open the photo.
+  const suppressClickRef = useRef(false);
+  const resyncingRef = useRef(false);
 
   useEffect(() => { detailRef.current = detail; }, [detail]);
   useEffect(() => { onlineRef.current = onlineIds; }, [onlineIds]);
@@ -117,6 +170,21 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     }
   }, [conversationId, onNotice]);
 
+  // Reloads the newest page and merges it in. Catches anything the realtime connection missed.
+  const resync = useCallback(async () => {
+    if (resyncingRef.current) return;
+    resyncingRef.current = true;
+    try {
+      const fresh = await api<Detail>(`/dm/conversations/${encodeURIComponent(conversationId)}`);
+      const keep = pendingRef.current;
+      setDetail(prev => (prev ? mergeDetail(prev, fresh, keep) : prev));
+    } catch {
+      // Keep what is on screen. The next resync tries again.
+    } finally {
+      resyncingRef.current = false;
+    }
+  }, [conversationId]);
+
   // Lets the other members know the group changed, so their open chat and inbox reload.
   const notifyGroup = useCallback(() => {
     const others = (detailRef.current?.conversation.members ?? []).filter(m => m.id !== user.id).map(m => m.id);
@@ -127,6 +195,14 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     void refreshConversation();
     notifyGroup();
   }, [refreshConversation, notifyGroup]);
+
+  // Tells online members about a change to one message (edit, reaction, unsend), so their open chat updates at once.
+  const notifyPeers = useCallback((event: string, payload: object) => {
+    const peers = (detailRef.current?.conversation.members ?? [])
+      .filter(m => m.id !== user.id && onlineRef.current.includes(m.id))
+      .map(m => m.id);
+    if (peers.length) void sendToPeers(peers, event, { conversationId, ...payload });
+  }, [conversationId, user.id]);
 
   // Marks the chat read and tells online members when it happened, so their "既読" label updates at once.
   const markRead = useCallback(() => {
@@ -142,13 +218,36 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
       .catch(() => undefined);
   }, [conversationId, onCountsChanged, user.id]);
 
+  const appendMessage = useCallback((message: DmMessage) => {
+    setDetail(prev => prev && !prev.messages.some(m => m.id === message.id)
+      ? { ...prev, messages: [...prev.messages, message] }
+      : prev);
+  }, []);
+
+  const removeMessage = useCallback((messageId: string) => {
+    setDetail(prev => prev && prev.messages.some(m => m.id === messageId)
+      ? { ...prev, messages: prev.messages.filter(m => m.id !== messageId) }
+      : prev);
+  }, []);
+
+  const patchMessage = useCallback((messageId: string, patch: Partial<DmMessage>) => {
+    setDetail(prev => (prev
+      ? { ...prev, messages: prev.messages.map(m => (m.id === messageId ? { ...m, ...patch } : m)) }
+      : prev));
+  }, []);
+
   useEffect(() => {
     setLoading(true);
     void load().then(markRead);
   }, [load, markRead]);
 
-  // Realtime: append messages from this conversation, apply read receipts, and reload the header on group changes.
+  // Realtime: append and remove messages, apply edits, reactions and read receipts, reload the header on group changes,
+  // and resync whenever the connection comes back or the app returns to the foreground.
   useEffect(() => onDmEvent(event => {
+    if (event.type === "resync") {
+      void resync();
+      return;
+    }
     if (event.type === "read") {
       if (event.conversationId !== conversationId) return;
       setDetail(prev => prev ? {
@@ -168,7 +267,15 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     }
     if (event.conversationId !== conversationId) return;
     if (event.type === "unsend") {
-      setDetail(prev => prev ? { ...prev, messages: prev.messages.filter(m => m.id !== event.messageId) } : prev);
+      removeMessage(event.messageId);
+      return;
+    }
+    if (event.type === "edit") {
+      patchMessage(event.messageId, { body: event.body, edited_at: event.editedAt });
+      return;
+    }
+    if (event.type === "react") {
+      patchMessage(event.messageId, { reactions: event.reactions });
       return;
     }
     if (event.type !== "message") return;
@@ -177,12 +284,18 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     if (current && !current.conversation.members.some(m => m.id === incoming.sender_id)) {
       void load();
     } else {
-      setDetail(prev => prev && !prev.messages.some(m => m.id === incoming.id)
-        ? { ...prev, messages: [...prev.messages, incoming] }
-        : prev);
+      appendMessage(incoming);
     }
     if (incoming.sender_id !== user.id) markRead();
-  }), [conversationId, load, markRead, refreshConversation, user.id]);
+  }), [conversationId, load, markRead, refreshConversation, resync, appendMessage, removeMessage, patchMessage, user.id]);
+
+  // Safety net: the open chat re-reads its newest page on a timer while the app is visible.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void resync();
+    }, RESYNC_EVERY_MS);
+    return () => window.clearInterval(timer);
+  }, [resync]);
 
   // Who is online in this conversation. Refreshed every 20 seconds; a send uses the latest answer.
   const onlineKey = onlineIds.join(",");
@@ -219,47 +332,41 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   }, [draft]);
 
   const rows = useMemo(() => buildRows(messages), [messages]);
-
-  const appendMessage = (message: DmMessage) => {
-    setDetail(prev => prev && !prev.messages.some(m => m.id === message.id)
-      ? { ...prev, messages: [...prev.messages, message] }
-      : prev);
-  };
-
-  const removeMessage = (messageId: string) => {
-    setDetail(prev => prev && prev.messages.some(m => m.id === messageId)
-      ? { ...prev, messages: prev.messages.filter(m => m.id !== messageId) }
-      : prev);
-  };
+  const messageById = useMemo(() => new Map(messages.map(m => [m.id, m] as [string, DmMessage])), [messages]);
 
   // Online recipients receive the text over the socket before the database save. Offline recipients get the saved row as before.
   const sendText = async () => {
+    if (editing) return void saveEdit();
     const body = draft.trim();
     if (!body || sending) return;
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString();
+    const replyId = replyTo?.id ?? null;
     const recipients = (detail?.conversation.members ?? [])
       .filter(m => m.id !== user.id && onlineIds.includes(m.id))
       .map(m => m.id);
 
+    pendingRef.current.add(id);
     setSending(true);
     const shownLive = recipients.length > 0 && await sendLiveDm(
       conversationId,
-      { id, conversation_id: conversationId, sender_id: user.id, created_at: createdAt, kind: "text", body },
+      { id, conversation_id: conversationId, sender_id: user.id, created_at: createdAt, kind: "text", body, reply_to: replyId },
       recipients
     );
     if (shownLive) {
       setDraft(v => (v === body ? "" : v));
-      appendMessage({ id, sender_id: user.id, created_at: createdAt, kind: "text", body, image_url: null });
+      setReplyTo(v => (v?.id === replyId ? null : v));
+      appendMessage({ id, sender_id: user.id, created_at: createdAt, kind: "text", body, image_url: null, reply_to: replyId, edited_at: null, reactions: [] });
     }
 
     try {
       const r = await api<{ message: DmMessage }>(`/dm/conversations/${encodeURIComponent(conversationId)}/messages`, {
         method: "POST",
-        body: JSON.stringify({ id, body })
+        body: JSON.stringify({ id, body, replyTo: replyId })
       });
       if (!shownLive) {
         setDraft(v => (v === body ? "" : v));
+        setReplyTo(v => (v?.id === replyId ? null : v));
         appendMessage(r.message);
       }
     } catch (e) {
@@ -270,13 +377,148 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
       }
       onNotice(errorMessage(e, "メッセージを送信できませんでした"));
     } finally {
+      pendingRef.current.delete(id);
       setSending(false);
       inputRef.current?.focus();
     }
   };
 
-  // Enter sends; Shift+Enter starts a new line. IME composition keeps its own Enter.
+  // Saves an edited text message. Members who are online see the change at once.
+  const saveEdit = async () => {
+    const target = editing;
+    const body = draft.trim();
+    if (!target || !body || sending) return;
+    if (body === target.body) {
+      cancelEdit();
+      return;
+    }
+    setSending(true);
+    try {
+      const r = await api<{ message: { id: string; body: string; edited_at: string } }>(
+        `/dm/messages/${encodeURIComponent(target.id)}`,
+        { method: "PATCH", body: JSON.stringify({ body }) }
+      );
+      patchMessage(target.id, { body: r.message.body, edited_at: r.message.edited_at });
+      notifyPeers("edit", { messageId: target.id, body: r.message.body, editedAt: r.message.edited_at });
+      setEditing(null);
+      setDraft(stashRef.current);
+      stashRef.current = "";
+    } catch (e) {
+      onNotice(errorMessage(e, "編集できませんでした"));
+    } finally {
+      setSending(false);
+      inputRef.current?.focus();
+    }
+  };
+
+  const cancelEdit = () => {
+    setEditing(null);
+    setDraft(stashRef.current);
+    stashRef.current = "";
+  };
+
+  const startEdit = (message: DmMessage) => {
+    if (!editing) stashRef.current = draft;
+    setReplyTo(null);
+    setEditing(message);
+    setDraft(message.body ?? "");
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const startReply = (message: DmMessage) => {
+    if (editing) cancelEdit();
+    setReplyTo(message);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const toggleReaction = async (message: DmMessage, emoji: string) => {
+    try {
+      const r = await api<{ reactions: DmReaction[] }>(
+        `/dm/messages/${encodeURIComponent(message.id)}/reactions`,
+        { method: "POST", body: JSON.stringify({ emoji }) }
+      );
+      patchMessage(message.id, { reactions: r.reactions });
+      notifyPeers("react", { messageId: message.id, reactions: r.reactions });
+    } catch (e) {
+      onNotice(errorMessage(e, "リアクションできませんでした"));
+    }
+  };
+
+  const unsend = async (message: DmMessage) => {
+    if (!confirm("このメッセージの送信を取り消しますか？")) return;
+    try {
+      await api(`/dm/messages/${encodeURIComponent(message.id)}`, { method: "DELETE" });
+      removeMessage(message.id);
+      notifyPeers("unsend", { messageId: message.id });
+      onCountsChanged();
+    } catch (e) {
+      onNotice(errorMessage(e, "送信を取り消せませんでした"));
+    }
+  };
+
+  const copyMessage = async (message: DmMessage) => {
+    const text = message.body ?? "";
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard API is unavailable on some non-HTTPS or older browsers; fall back to a selected textarea.
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      const copied = document.execCommand("copy");
+      area.remove();
+      if (!copied) {
+        onNotice("コピーできませんでした。");
+        return;
+      }
+    }
+    onNotice("コピーしました。");
+  };
+
+  // Scrolls to the message a reply quote points at and briefly highlights it.
+  const jumpTo = (messageId: string) => {
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-mid="${messageId}"]`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("is-flash");
+    window.setTimeout(() => el.classList.remove("is-flash"), 1000);
+  };
+
+  // Long press (touch or mouse) on a message opens its action sheet. Moving the finger cancels it, so scrolling still works.
+  const cancelPress = () => {
+    window.clearTimeout(pressRef.current.timer);
+    pressRef.current.timer = undefined;
+  };
+  const startPress = (message: DmMessage, e: ReactPointerEvent) => {
+    cancelPress();
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    suppressClickRef.current = false;
+    pressRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      timer: window.setTimeout(() => {
+        pressRef.current.timer = undefined;
+        suppressClickRef.current = true;
+        setMenuMessage(message);
+      }, LONG_PRESS_MS)
+    };
+  };
+  const movePress = (e: ReactPointerEvent) => {
+    const p = pressRef.current;
+    if (p.timer !== undefined && Math.hypot(e.clientX - p.x, e.clientY - p.y) > 10) cancelPress();
+  };
+
+  // Enter sends; Shift+Enter starts a new line. IME composition keeps its own Enter. Escape leaves reply or edit mode.
   const onInputKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Escape") {
+      if (editing) cancelEdit();
+      else if (replyTo) setReplyTo(null);
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       void sendText();
@@ -288,12 +530,15 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     e.target.value = "";
     if (!file) return;
     if (!file.type.startsWith("image/")) return onNotice("画像ファイルを選択してください。");
+    const replyId = replyTo?.id ?? null;
     setSendingPhoto(true);
     try {
       const body = new FormData();
       body.append("file", await optimizeImage(file, 1920));
+      if (replyId) body.append("replyTo", replyId);
       const r = await api<{ message: DmMessage }>(`/dm/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body });
       appendMessage(r.message);
+      setReplyTo(v => (v?.id === replyId ? null : v));
     } catch (err) {
       onNotice(errorMessage(err, "画像を送信できませんでした"));
     } finally {
@@ -351,6 +596,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   const avatarUrl = conversation.is_group ? (conversation.icon_url ?? null) : (partner?.avatar_url ?? null);
   // Only the newest message I sent shows a read receipt, as in Instagram.
   const lastMine = [...messages].reverse().find(m => m.sender_id === user.id);
+  const replyName = (m: DmMessage) => people.get(m.sender_id)?.display_name ?? "退会したユーザー";
 
   return (
     <section className="dm-pane">
@@ -406,8 +652,10 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
           const isPhoto = message.kind === "image" && message.image_url;
           const isReceiptTarget = mine && lastMine?.id === message.id;
           const readers = isReceiptTarget ? readCount(message, conversation.members) : 0;
+          const quoted = message.reply_to ? messageById.get(message.reply_to) : undefined;
+          const groups = reactionGroups(message.reactions, user.id);
           return (
-            <div key={row.key} className={`dm-msg ${mine ? "mine" : "theirs"} ${first ? "first" : ""} ${last ? "last" : ""}`}>
+            <div key={row.key} data-mid={message.id} className={`dm-msg ${mine ? "mine" : "theirs"} ${first ? "first" : ""} ${last ? "last" : ""}`}>
               {!mine && (
                 <span className="dm-msg-avatar" aria-hidden={!last}>
                   {last && <Avatar url={sender?.avatar_url ?? null} name={sender?.display_name ?? ""} size="small" />}
@@ -417,18 +665,64 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
                 {!mine && conversation.is_group && first && (
                   <small className="dm-msg-name">{sender?.display_name ?? "退会したユーザー"}</small>
                 )}
+                {message.reply_to && (
+                  <button type="button" className="dm-quote" onClick={() => jumpTo(message.reply_to!)}>
+                    <strong>{quoted ? replyName(quoted) : "返信"}</strong>
+                    <span>{quoted ? quoteText(quoted) : "返信元のメッセージ"}</span>
+                  </button>
+                )}
                 {isPhoto ? (
-                  <a className="dm-photo" href={message.image_url!} target="_blank" rel="noopener noreferrer" aria-label="画像を開く">
+                  <a
+                    className="dm-photo"
+                    href={message.image_url!}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="画像を開く"
+                    onClick={e => { if (suppressClickRef.current) { e.preventDefault(); suppressClickRef.current = false; } }}
+                    onPointerDown={e => startPress(message, e)}
+                    onPointerMove={movePress}
+                    onPointerUp={cancelPress}
+                    onPointerLeave={cancelPress}
+                    onPointerCancel={cancelPress}
+                    onContextMenu={e => { e.preventDefault(); setMenuMessage(message); }}
+                  >
                     <img
                       src={message.image_url!}
                       alt="送信された画像"
                       loading="lazy"
+                      decoding="async"
                       onLoad={() => { if (message.id === lastId) scrollBottom(); }}
                     />
                   </a>
                 ) : (
-                  <p className="dm-bubble">{message.body}</p>
+                  <p
+                    className="dm-bubble"
+                    onPointerDown={e => startPress(message, e)}
+                    onPointerMove={movePress}
+                    onPointerUp={cancelPress}
+                    onPointerLeave={cancelPress}
+                    onPointerCancel={cancelPress}
+                    onContextMenu={e => { e.preventDefault(); setMenuMessage(message); }}
+                  >
+                    {message.body}
+                  </p>
                 )}
+                {groups.length > 0 && (
+                  <div className={`dm-reactions ${mine ? "mine" : ""}`}>
+                    {groups.map(g => (
+                      <button
+                        key={g.emoji}
+                        type="button"
+                        className={`dm-reaction ${g.mine ? "is-mine" : ""}`}
+                        onClick={() => void toggleReaction(message, g.emoji)}
+                        aria-label={`${g.emoji} ${g.count}件`}
+                      >
+                        {g.emoji}{g.count > 1 && <span>{g.count}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {message.edited_at && <small className="dm-edited">編集済み</small>}
                 {isReceiptTarget && (
                   <small
                     className={`dm-receipt ${readers > 0 ? "is-read" : ""}`}
@@ -447,42 +741,75 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
         )}
       </div>
 
-      <footer className="dm-composer">
-        <button
-          type="button"
-          className="dm-icon-btn dm-photo-btn"
-          onClick={() => fileRef.current?.click()}
-          disabled={sendingPhoto}
-          aria-label="写真を送信"
-          title="写真を送信"
-        >
-          {sendingPhoto ? <LoaderCircle size={20} className="spin" /> : <ImagePlus size={22} />}
-        </button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp,image/gif"
-          className="visually-hidden"
-          onChange={e => void sendPhoto(e)}
-        />
-        <div className="dm-input-pill">
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={draft}
-            maxLength={MAX_TEXT_LENGTH}
-            placeholder="メッセージを入力…"
-            aria-label="メッセージ"
-            onChange={e => setDraft(e.target.value)}
-            onKeyDown={onInputKey}
-          />
-          {draft.trim() && (
-            <button type="button" className="dm-send-text" onClick={() => void sendText()} disabled={sending}>
-              {sending ? <LoaderCircle size={15} className="spin" /> : "送信"}
+      <div className="dm-compose-wrap">
+        {(replyTo || editing) && (
+          <div className="dm-composer-mode">
+            {editing ? <Pencil size={15} /> : <CornerUpLeft size={15} />}
+            <div className="dm-composer-mode-text">
+              <strong>{editing ? "メッセージを編集" : `${replyName(replyTo!)}に返信`}</strong>
+              <span>{editing ? (editing.body ?? "") : quoteText(replyTo!)}</span>
+            </div>
+            <button
+              type="button"
+              className="dm-icon-btn"
+              onClick={editing ? cancelEdit : () => setReplyTo(null)}
+              aria-label={editing ? "編集を取り消す" : "返信を取り消す"}
+            >
+              <X size={16} />
             </button>
-          )}
-        </div>
-      </footer>
+          </div>
+        )}
+
+        <footer className="dm-composer">
+          <button
+            type="button"
+            className="dm-icon-btn dm-photo-btn"
+            onClick={() => fileRef.current?.click()}
+            disabled={sendingPhoto || Boolean(editing)}
+            aria-label="写真を送信"
+            title="写真を送信"
+          >
+            {sendingPhoto ? <LoaderCircle size={20} className="spin" /> : <ImagePlus size={22} />}
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            className="visually-hidden"
+            onChange={e => void sendPhoto(e)}
+          />
+          <div className="dm-input-pill">
+            <textarea
+              ref={inputRef}
+              rows={1}
+              value={draft}
+              maxLength={MAX_TEXT_LENGTH}
+              placeholder={editing ? "メッセージを編集…" : "メッセージを入力…"}
+              aria-label="メッセージ"
+              onChange={e => setDraft(e.target.value)}
+              onKeyDown={onInputKey}
+            />
+            {draft.trim() && (
+              <button type="button" className="dm-send-text" onClick={() => void sendText()} disabled={sending}>
+                {sending ? <LoaderCircle size={15} className="spin" /> : editing ? "保存" : "送信"}
+              </button>
+            )}
+          </div>
+        </footer>
+      </div>
+
+      {menuMessage && (
+        <MessageMenu
+          message={menuMessage}
+          mine={menuMessage.sender_id === user.id}
+          onClose={() => setMenuMessage(null)}
+          onReact={emoji => void toggleReaction(menuMessage, emoji)}
+          onReply={() => startReply(menuMessage)}
+          onCopy={() => void copyMessage(menuMessage)}
+          onEdit={() => startEdit(menuMessage)}
+          onUnsend={() => void unsend(menuMessage)}
+        />
+      )}
 
       {infoOpen && conversation.is_group && (
         <GroupInfoSheet

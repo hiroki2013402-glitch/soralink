@@ -7,6 +7,7 @@ import { errorMessage } from "../../lib/errors";
 import type { DmConversation, DmNote, User } from "../../types";
 import NewMessageSheet from "./NewMessageSheet";
 import NotesRow from "./NotesRow";
+import PushPrompt from "./PushPrompt";
 import { shortAgo } from "./dmFormat";
 
 type Props = {
@@ -120,6 +121,8 @@ export default function MessagesPage({ user, counts, selectedId, onOpenConversat
         <Search size={15} />
         <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="検索" aria-label="メッセージを検索" />
       </label>
+
+      <PushPrompt />
 
       <NotesRow
         user={user}

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { requireAuth } from "./auth.js";
 import { db } from "./db.js";
 import { mintRealtimeToken, sb, supabaseAnonKey, supabaseUrl } from "./supabase.js";
+import { notifyDmRecipients } from "./push.js";
 
 // Direct messages. Conversations, members, messages and notes live in Supabase; the user directory stays in Turso.
 export const dm = Router();
@@ -29,6 +30,10 @@ type Role = "owner" | "sub_admin" | "member";
 const ROLE_RANK: Record<Role, number> = { owner: 0, sub_admin: 1, member: 2 };
 const MAX_GROUP_TITLE_LENGTH = 60;
 const MAX_DESCRIPTION_LENGTH = 200;
+// Signed image URLs live longer so the browser can reuse them from its cache instead of re-requesting each time.
+const SIGNED_URL_SECONDS = 3600;
+// Reactions allowed on a message. Keep in sync with DM_REACTIONS in the client (MessageMenu.tsx).
+const REACTIONS = ["❤️", "👍", "😂", "😮", "😢", "🙏"] as const;
 
 const upload = multer({
 
@@ -62,6 +67,13 @@ const noteSchema = z.object({
   body: z.string().trim().min(1, "ノートを入力してください。").max(NOTE_MAX_LENGTH, `ノートは${NOTE_MAX_LENGTH}文字以内で入力してください。`)
 });
 
+const editSchema = z.object({
+  body: z.string().trim().min(1, "メッセージを入力してください。").max(MAX_TEXT_LENGTH, "メッセージは1000文字以内で入力してください。")
+});
+const reactionSchema = z.object({
+  emoji: z.enum(REACTIONS, { errorMap: () => ({ message: "このリアクションは使えません。" }) })
+});
+
 type Person = { id: string; display_name: string; avatar_url: string | null };
 type MemberRow = { user_id: string; role: Role; joined_at: string; last_read_at: string | null };
 
@@ -82,6 +94,11 @@ const isUuid = (value: string) => z.string().uuid().safeParse(value).success;
 const imageUrlFor = (messageId: string) => `/api/dm/messages/${messageId}/image`;
 const unknownPerson = (id: string): Person => ({ id, display_name: "退会したユーザー", avatar_url: null });
 const previewOf = (text: string) => text.replace(/\s+/g, " ").slice(0, 80);
+// A row as read from dm_messages. reply_to and edited_at are null for messages without them.
+type MessageRow = { id: string; sender_id: string; created_at: string; kind: string | null; body: string | null; reply_to?: string | null; edited_at?: string | null };
+type ReactionEntry = { emoji: string; user_id: string };
+// A reply target must be a real message id; anything else is ignored.
+const replyIdOf = (value: unknown) => (typeof value === "string" && isUuid(value) ? value : null);
 
 // Checks the file's leading bytes so a renamed non-image cannot be stored as an image.
 function hasImageSignature(buffer: Buffer, mime: string) {
@@ -159,11 +176,17 @@ async function findDirectConversation(a: string, b: string) {
   if (!shared.length) return null;
   const direct = await sb.from("dm_conversations").select("id").in("id", shared).eq("is_group", false);
   if (direct.error) throw direct.error;
-  for (const row of direct.data ?? []) {
-    const count = await sb.from("dm_members").select("user_id", { count: "exact", head: true }).eq("conversation_id", row.id);
-    if (count.count === 2) return String(row.id);
+  const directIds = (direct.data ?? []).map((row: { id: string }) => String(row.id));
+  if (!directIds.length) return null;
+  // One query for every member row of those chats, instead of one count query per chat.
+  const members = await sb.from("dm_members").select("conversation_id").in("conversation_id", directIds);
+  if (members.error) throw members.error;
+  const counts = new Map<string, number>();
+  for (const row of members.data ?? []) {
+    const key = String(row.conversation_id);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  return null;
+  return directIds.find(id => counts.get(id) === 2) ?? null;
 }
 
 // Short-lived token for the browser's Supabase Realtime connection.
@@ -278,7 +301,7 @@ dm.get("/dm/conversations/:id", requireAuth, async (req, res) => {
     if (!(await isMember(id, me))) return res.status(404).json({ error: "会話が見つかりません。" });
 
     const before = typeof req.query.before === "string" && !Number.isNaN(Date.parse(req.query.before)) ? req.query.before : "";
-    let messageQuery = sb.from("dm_messages").select("id, sender_id, created_at, kind, body").eq("conversation_id", id);
+    let messageQuery = sb.from("dm_messages").select("id, sender_id, created_at, kind, body, reply_to, edited_at").eq("conversation_id", id);
     if (before) messageQuery = messageQuery.lt("created_at", before);
 
     const [conversation, members, messages] = await Promise.all([
@@ -294,7 +317,10 @@ dm.get("/dm/conversations/:id", requireAuth, async (req, res) => {
     const people = await peopleById(memberRows.map(m => m.user_id));
     // Owner first, then sub-admins, then members. Within a role, earlier joiners come first.
     const ordered = [...memberRows].sort((a, b) => ROLE_RANK[a.role] - ROLE_RANK[b.role] || a.joined_at.localeCompare(b.joined_at));
-    const rows: { id: string; sender_id: string; created_at: string; kind: string | null; body: string | null }[] = messages.data ?? [];
+    const rows: MessageRow[] = messages.data ?? [];
+    const pageRows = rows.slice(0, PAGE_SIZE);
+    // Reactions for this page in one query.
+    const reactionMap = await reactionsFor(pageRows.map(m => m.id));
 
     res.json({
       conversation: {
@@ -311,7 +337,7 @@ dm.get("/dm/conversations/:id", requireAuth, async (req, res) => {
           last_read_at: m.last_read_at
         }))
       },
-      messages: rows.slice(0, PAGE_SIZE).reverse().map(m => toMessage(m)),
+      messages: pageRows.reverse().map(m => toMessage(m, reactionMap.get(m.id))),
       hasMore: rows.length > PAGE_SIZE
     });
   } catch {
@@ -320,7 +346,7 @@ dm.get("/dm/conversations/:id", requireAuth, async (req, res) => {
 });
 
 // Legacy rows have no kind and are images; text rows carry their body.
-function toMessage(m: { id: string; sender_id: string; created_at: string; kind: string | null; body: string | null }) {
+function toMessage(m: MessageRow, reactions: ReactionEntry[] = []) {
   const isText = m.kind === "text";
   return {
     id: m.id,
@@ -328,8 +354,26 @@ function toMessage(m: { id: string; sender_id: string; created_at: string; kind:
     created_at: m.created_at,
     kind: isText ? "text" : "image",
     body: isText ? m.body : null,
-    image_url: isText ? null : imageUrlFor(m.id)
+    image_url: isText ? null : imageUrlFor(m.id),
+    reply_to: m.reply_to ?? null,
+    edited_at: m.edited_at ?? null,
+    reactions
   };
+}
+
+// Reactions for many messages, grouped by message id.
+async function reactionsFor(messageIds: string[]) {
+  const byMessage = new Map<string, ReactionEntry[]>();
+  if (!messageIds.length) return byMessage;
+  const r = await sb.from("dm_reactions").select("message_id, user_id, emoji").in("message_id", messageIds);
+  if (r.error) throw r.error;
+  for (const row of r.data ?? []) {
+    const id = String(row.message_id);
+    const list = byMessage.get(id) ?? [];
+    list.push({ emoji: String(row.emoji), user_id: String(row.user_id) });
+    byMessage.set(id, list);
+  }
+  return byMessage;
 }
 
 // Text (JSON { body }) or one image (multipart "file"). Images go to a private Supabase Storage bucket.
@@ -339,6 +383,14 @@ dm.post("/dm/conversations/:id/messages", requireAuth, uploadImage, async (req, 
   const file = req.file;
   try {
     if (!(await isMember(conversationId, me))) return res.status(404).json({ error: "会話が見つかりません。" });
+
+    // A reply must point at a message in this same conversation.
+    const replyTo = replyIdOf(req.body?.replyTo);
+    if (replyTo) {
+      const target = await sb.from("dm_messages").select("id").eq("id", replyTo).eq("conversation_id", conversationId).maybeSingle();
+      if (target.error) throw target.error;
+      if (!target.data) return res.status(400).json({ error: "返信先のメッセージが見つかりません。" });
+    }
 
     let messageId: string = crypto.randomUUID();
     const now = new Date().toISOString();
@@ -350,13 +402,13 @@ dm.post("/dm/conversations/:id/messages", requireAuth, uploadImage, async (req, 
       const path = `${conversationId}/${messageId}.${IMAGE_EXTENSIONS.get(file.mimetype)}`;
       const uploaded = await sb.storage.from(BUCKET).upload(path, new Uint8Array(file.buffer), { contentType: file.mimetype, upsert: false });
       if (uploaded.error) throw uploaded.error;
-      row = { id: messageId, conversation_id: conversationId, sender_id: me, kind: "image", image_path: path, mime_type: file.mimetype, created_at: now };
+      row = { id: messageId, conversation_id: conversationId, sender_id: me, kind: "image", image_path: path, mime_type: file.mimetype, created_at: now, reply_to: replyTo };
       preview = "写真を送信しました";
     } else {
       const parsed = textSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "メッセージを入力してください。" });
       if (parsed.data.id) messageId = parsed.data.id;
-      row = { id: messageId, conversation_id: conversationId, sender_id: me, kind: "text", body: parsed.data.body, created_at: now };
+      row = { id: messageId, conversation_id: conversationId, sender_id: me, kind: "text", body: parsed.data.body, created_at: now, reply_to: replyTo };
       preview = previewOf(parsed.data.body);
     }
 
@@ -366,12 +418,122 @@ dm.post("/dm/conversations/:id/messages", requireAuth, uploadImage, async (req, 
       throw inserted.error;
     }
     await sb.from("dm_conversations").update({ last_message_at: now, last_preview: preview, last_sender_id: me }).eq("id", conversationId);
+    // Push notifications run in the background; the sender does not wait for them.
+    void sendDmPush(conversationId, me, req.user!.display_name, preview).catch(() => undefined);
 
-    res.status(201).json({ message: toMessage({ id: messageId, sender_id: me, created_at: now, kind: String(row.kind), body: (row.body as string) ?? null }) });
+    res.status(201).json({ message: toMessage({ id: messageId, sender_id: me, created_at: now, kind: String(row.kind), body: (row.body as string) ?? null, reply_to: replyTo }) });
   } catch {
     res.status(500).json({ error: file ? "画像を送信できませんでした。" : "メッセージを送信できませんでした。" });
   }
 });
+
+// ---- Edit, unsend and reactions ------------------------------------------------
+// Only the sender may edit (text only) or unsend a message. Unsending removes the row, its reactions and any photo.
+// The browser then tells the other members over Realtime, the same way it does for live messages.
+
+type OwnMessage = { id: string; conversation_id: string; sender_id: string; kind: string | null; image_path: string | null };
+
+async function loadMessage(messageId: string): Promise<OwnMessage | null> {
+  const found = await sb.from("dm_messages").select("id, conversation_id, sender_id, kind, image_path").eq("id", messageId).maybeSingle();
+  if (found.error) throw found.error;
+  return (found.data ?? null) as OwnMessage | null;
+}
+
+// Keeps the inbox preview and ordering in step with the newest message that remains.
+async function refreshPreview(conversationId: string) {
+  const newest = await sb.from("dm_messages").select("sender_id, kind, body, created_at").eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (newest.error) throw newest.error;
+  if (!newest.data) {
+    const cleared = await sb.from("dm_conversations").update({ last_preview: null, last_sender_id: null }).eq("id", conversationId);
+    if (cleared.error) throw cleared.error;
+    return;
+  }
+  const isText = newest.data.kind === "text";
+  const updated = await sb.from("dm_conversations").update({
+    last_preview: isText ? previewOf(String(newest.data.body ?? "")) : "写真を送信しました",
+    last_sender_id: String(newest.data.sender_id),
+    last_message_at: String(newest.data.created_at)
+  }).eq("id", conversationId);
+  if (updated.error) throw updated.error;
+}
+
+dm.patch("/dm/messages/:id", requireAuth, async (req, res) => {
+  const parsed = editSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "入力を確認してください。" });
+  const me = req.user!.id;
+  const messageId = param(req, "id");
+  try {
+    const message = isUuid(messageId) ? await loadMessage(messageId) : null;
+    if (!message || !(await isMember(message.conversation_id, me))) return res.status(404).json({ error: "メッセージが見つかりません。" });
+    if (message.sender_id !== me) return res.status(403).json({ error: "自分のメッセージだけ編集できます。" });
+    if (message.kind !== "text") return res.status(400).json({ error: "写真は編集できません。" });
+
+    const editedAt = new Date().toISOString();
+    const updated = await sb.from("dm_messages").update({ body: parsed.data.body, edited_at: editedAt }).eq("id", messageId);
+    if (updated.error) throw updated.error;
+    await refreshPreview(message.conversation_id);
+    res.json({ message: { id: messageId, body: parsed.data.body, edited_at: editedAt } });
+  } catch {
+    res.status(500).json({ error: "メッセージを編集できませんでした。" });
+  }
+});
+
+dm.delete("/dm/messages/:id", requireAuth, async (req, res) => {
+  const me = req.user!.id;
+  const messageId = param(req, "id");
+  try {
+    const message = isUuid(messageId) ? await loadMessage(messageId) : null;
+    if (!message || !(await isMember(message.conversation_id, me))) return res.status(404).json({ error: "メッセージが見つかりません。" });
+    if (message.sender_id !== me) return res.status(403).json({ error: "自分のメッセージだけ送信を取り消せます。" });
+
+    const removed = await sb.from("dm_messages").delete().eq("id", messageId);
+    if (removed.error) throw removed.error;
+    if (message.image_path) await sb.storage.from(BUCKET).remove([message.image_path]);
+    await refreshPreview(message.conversation_id);
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: "送信を取り消せませんでした。" });
+  }
+});
+
+// Toggles the caller's reaction. Returns every reaction on the message so the browser can show the current state.
+dm.post("/dm/messages/:id/reactions", requireAuth, async (req, res) => {
+  const parsed = reactionSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "リアクションを選択してください。" });
+  const me = req.user!.id;
+  const messageId = param(req, "id");
+  try {
+    const message = isUuid(messageId) ? await loadMessage(messageId) : null;
+    if (!message || !(await isMember(message.conversation_id, me))) return res.status(404).json({ error: "メッセージが見つかりません。" });
+
+    const emoji = parsed.data.emoji;
+    const existing = await sb.from("dm_reactions").select("emoji").eq("message_id", messageId).eq("user_id", me).eq("emoji", emoji).maybeSingle();
+    if (existing.error) throw existing.error;
+    const changed = existing.data
+      ? await sb.from("dm_reactions").delete().eq("message_id", messageId).eq("user_id", me).eq("emoji", emoji)
+      : await sb.from("dm_reactions").insert({ message_id: messageId, user_id: me, emoji });
+    if (changed.error) throw changed.error;
+
+    const reactions = await reactionsFor([messageId]);
+    res.json({ reactions: reactions.get(messageId) ?? [] });
+  } catch {
+    res.status(500).json({ error: "リアクションできませんでした。" });
+  }
+});
+
+// Notifies the other members of a conversation who are not online. Online members already see the message in the app.
+async function sendDmPush(conversationId: string, senderId: string, senderName: string, preview: string) {
+  const members = await sb.from("dm_members").select("user_id").eq("conversation_id", conversationId).neq("user_id", senderId);
+  if (members.error) return;
+  await notifyDmRecipients({
+    recipients: (members.data ?? []).map((m: { user_id: string }) => String(m.user_id)),
+    conversationId,
+    senderName,
+    preview,
+    isOnline: uid => Date.now() - (lastHeartbeat.get(uid) ?? 0) < ONLINE_WINDOW_MS
+  });
+}
 
 // ---- Presence ----------------------------------------------------------------
 // The browser sends a heartbeat every 30 seconds while the app is visible. A user counts as online for 75 seconds after the last one.
@@ -414,9 +576,9 @@ dm.get("/dm/messages/:id/image", requireAuth, async (req, res) => {
     if (found.error) throw found.error;
     if (!found.data?.image_path || !(await isMember(String(found.data.conversation_id), req.user!.id))) return res.status(404).end();
 
-    const signed = await sb.storage.from(BUCKET).createSignedUrl(String(found.data.image_path), 300);
+    const signed = await sb.storage.from(BUCKET).createSignedUrl(String(found.data.image_path), SIGNED_URL_SECONDS);
     if (signed.error || !signed.data) throw signed.error ?? new Error("署名付きURLを作成できませんでした。");
-    res.setHeader("Cache-Control", "private, max-age=240");
+    res.setHeader("Cache-Control", "private, max-age=3000");
     res.redirect(signed.data.signedUrl);
   } catch {
     res.status(500).end();
@@ -504,9 +666,9 @@ dm.get("/dm/conversations/:id/icon", requireAuth, async (req, res) => {
     if (conversation.error) throw conversation.error;
     if (!conversation.data?.icon_path) return res.status(404).end();
 
-    const signed = await sb.storage.from(BUCKET).createSignedUrl(String(conversation.data.icon_path), 300);
+    const signed = await sb.storage.from(BUCKET).createSignedUrl(String(conversation.data.icon_path), SIGNED_URL_SECONDS);
     if (signed.error || !signed.data) throw signed.error ?? new Error("署名付きURLを作成できませんでした。");
-    res.setHeader("Cache-Control", "private, max-age=240");
+    res.setHeader("Cache-Control", "private, max-age=3000");
     res.redirect(signed.data.signedUrl);
   } catch {
     res.status(500).end();
