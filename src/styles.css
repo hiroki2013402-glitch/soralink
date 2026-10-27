@@ -797,3 +797,4 @@ button.x-detail-media{cursor:zoom-in}
 /* ---- Images: a soft placeholder shows until the (smaller) feed image arrives ---- */
 .x-post-media{background:#eef2f7}
 .x-post-media img{background:#eef2f7}
+.reduce-motion *,.reduce-motion *::before,.reduce-motion *::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}

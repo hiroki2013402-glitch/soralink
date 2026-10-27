@@ -159,6 +159,16 @@ export async function initializeDatabase() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id)`
   ], "write");
+  // Account settings (see settings.ts). A missing row means every switch is on.
+  await db.batch([
+    `CREATE TABLE IF NOT EXISTS user_settings (
+      user_id TEXT PRIMARY KEY REFERENCES users(id),
+      dm_push INTEGER NOT NULL DEFAULT 1,
+      notify_likes INTEGER NOT NULL DEFAULT 1,
+      notify_follows INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL
+    )`
+  ], "write");
   if (!userNames.has("banned_at")) await db.execute("ALTER TABLE users ADD COLUMN banned_at TEXT");
   if (!userNames.has("banned_reason")) await db.execute("ALTER TABLE users ADD COLUMN banned_reason TEXT");
 

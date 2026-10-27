@@ -38,7 +38,7 @@ export type DmDetailConversation = { id:string; is_group:boolean; title:string|n
 // One reaction: the emoji and who reacted. The viewer's own reactions are found by user_id.
 export type DmReaction = { emoji:string; user_id:string };
 // reply_to is the message this one answers; edited_at is set once a text message has been edited.
-export type DmMessage = { id:string; sender_id:string; created_at:string; kind:"text"|"image"; body:string|null; image_url:string|null; reply_to?:string|null; edited_at?:string|null; reactions?:DmReaction[] };
+export type DmMessage = { id:string; sender_id:string; created_at:string; kind:"text"|"image"; body:string|null; image_url:string|null; reply_to?:string|null; edited_at?:string|null; reactions?:DmReaction[]; status?:"sending"|"failed" };
 // A note is a short status shown for 24 hours above the author's avatar in the message list.
 export type DmNote = { user_id:string; body:string; created_at:string; expires_at:string; display_name:string; avatar_url:string|null };
 

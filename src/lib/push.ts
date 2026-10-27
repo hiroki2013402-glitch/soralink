@@ -93,3 +93,10 @@ export async function disablePush() {
     // Notifications are best-effort; sign-out must still succeed.
   }
 }
+
+// The push endpoint of this browser, or null when this browser is not receiving notifications.
+export async function currentEndpoint(): Promise<string | null> {
+  if (!pushSupported() || Notification.permission !== "granted") return null;
+  const sub = await currentSubscription();
+  return sub ? sub.endpoint : null;
+}

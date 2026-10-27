@@ -14,6 +14,7 @@ import { api } from "./routes.js";
 import { admin } from "./admin.js";
 import { dm } from "./dm.js";
 import { push } from "./push.js";
+import { settingsRouter } from "./settings.js";
 import { videos } from "./videos.js";
 import { initializeVideoDatabase, isVideoDatabaseReady } from "./videoDb.js";
 
@@ -53,10 +54,10 @@ app.use((req, res, next) => {
 
 // Small per-process limiter. Use a shared store (for example Redis) for multi-instance production.
 const buckets = new Map<string, { count: number; resetAt: number }>();
-function rateLimit(limit: number, windowMs: number) {
+function rateLimit(limit: number, windowMs: number, scope?: string) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const now = Date.now();
-    const key = `${req.ip}:${req.path.startsWith("/api/auth/") ? "auth" : req.method === "GET" ? "read" : "write"}`;
+    const key = `${req.ip}:${scope ?? (req.path.startsWith("/api/auth/") ? "auth" : req.method === "GET" ? "read" : "write")}`;
     let bucket = buckets.get(key);
     if (!bucket || bucket.resetAt <= now) { bucket = { count: 0, resetAt: now + windowMs }; buckets.set(key, bucket); }
     bucket.count += 1;
@@ -77,6 +78,8 @@ const BINARY_READ = /^\/(media\/[0-9a-f-]{36}|dm\/messages\/[0-9a-f-]{36}\/image
 app.use("/api", (req, res, next) => {
   if (req.method === "PUT" && /^\/media\/video\/[0-9a-f-]{36}\/chunk\/\d+$/i.test(req.path)) return rateLimit(1200, 60_000)(req, res, next);
   if (req.method === "GET" && BINARY_READ.test(req.path)) return next();
+  // Presence heartbeats arrive every few seconds per open tab. They have their own budget, so they never crowd out real actions.
+  if (req.method === "POST" && /^\/dm\/presence(\/leave)?$/.test(req.path)) return rateLimit(240, 60_000, "presence")(req, res, next);
   return req.method === "GET" ? rateLimit(300, 60_000)(req, res, next) : rateLimit(60, 60_000)(req, res, next);
 });
 app.use(cookieParser());
@@ -91,6 +94,7 @@ registerOAuthRoutes(app);
 app.use("/api", admin);
 app.use("/api", dm);
 app.use("/api", push);
+app.use("/api", settingsRouter);
 app.use("/api", videos);
 app.use("/api", api);
 

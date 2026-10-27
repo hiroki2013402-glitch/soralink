@@ -4,6 +4,7 @@ import Avatar from "./Avatar";
 import VisibilityBadge from "./VisibilityBadge";
 import VideoPlayer from "./VideoPlayer";
 import RichText from "./RichText";
+import "./InteractionMotion.css";
 import PollView from "./PollView";
 import { posterFor } from "../lib/video";
 import { timeAgo } from "../lib/format";

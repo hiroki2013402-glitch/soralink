@@ -6,7 +6,7 @@ import { z } from "zod";
 import { requireAuth } from "./auth.js";
 import { db } from "./db.js";
 import { mintRealtimeToken, sb, supabaseAnonKey, supabaseUrl } from "./supabase.js";
-import { notifyDmRecipients } from "./push.js";
+import { markDeviceActive, markDeviceClosed, notifyDmRecipients } from "./push.js";
 
 // Direct messages. Conversations, members, messages and notes live in Supabase; the user directory stays in Turso.
 export const dm = Router();
@@ -382,13 +382,16 @@ dm.post("/dm/conversations/:id/messages", requireAuth, uploadImage, async (req, 
   const conversationId = param(req, "id");
   const file = req.file;
   try {
-    if (!(await isMember(conversationId, me))) return res.status(404).json({ error: "会話が見つかりません。" });
-
-    // A reply must point at a message in this same conversation.
+    // Membership and the reply target are independent lookups, so they run together.
     const replyTo = replyIdOf(req.body?.replyTo);
-    if (replyTo) {
-      const target = await sb.from("dm_messages").select("id").eq("id", replyTo).eq("conversation_id", conversationId).maybeSingle();
+    const [member, target] = await Promise.all([
+      isMember(conversationId, me),
+      replyTo ? sb.from("dm_messages").select("id").eq("id", replyTo).eq("conversation_id", conversationId).maybeSingle() : null
+    ]);
+    if (!member) return res.status(404).json({ error: "会話が見つかりません。" });
+    if (target) {
       if (target.error) throw target.error;
+      // A reply must point at a message in this same conversation.
       if (!target.data) return res.status(400).json({ error: "返信先のメッセージが見つかりません。" });
     }
 
@@ -417,11 +420,11 @@ dm.post("/dm/conversations/:id/messages", requireAuth, uploadImage, async (req, 
       if (file) await sb.storage.from(BUCKET).remove([String(row.image_path)]);
       throw inserted.error;
     }
-    await sb.from("dm_conversations").update({ last_message_at: now, last_preview: preview, last_sender_id: me }).eq("id", conversationId);
-    // Push notifications run in the background; the sender does not wait for them.
-    void sendDmPush(conversationId, me, req.user!.display_name, preview).catch(() => undefined);
-
+    // The sender gets the saved message straight away. The inbox preview and push notifications finish in the background.
     res.status(201).json({ message: toMessage({ id: messageId, sender_id: me, created_at: now, kind: String(row.kind), body: (row.body as string) ?? null, reply_to: replyTo }) });
+    void sb.from("dm_conversations").update({ last_message_at: now, last_preview: preview, last_sender_id: me }).eq("id", conversationId)
+      .then(result => { if (result.error) console.error("[dm] preview update failed", result.error.message); });
+    void sendDmPush(conversationId, me, req.user!.display_name, preview).catch(() => undefined);
   } catch {
     res.status(500).json({ error: file ? "画像を送信できませんでした。" : "メッセージを送信できませんでした。" });
   }
@@ -546,7 +549,17 @@ dm.post("/dm/presence", requireAuth, (req, res) => {
   if (lastHeartbeat.size > 10000) {
     for (const [userId, at] of lastHeartbeat) if (now - at > ONLINE_WINDOW_MS) lastHeartbeat.delete(userId);
   }
+  // The browser sends its own push endpoint, so this device (and only this one) is treated as having the app open.
+  const endpoint = typeof req.body?.endpoint === "string" ? req.body.endpoint : "";
+  if (endpoint.startsWith("https://") && endpoint.length <= 2048) void markDeviceActive(endpoint, req.user!.id).catch(() => undefined);
   res.json({ ok: true });
+});
+
+// Sent by the page as it closes (see AppPage), so the device stops counting as open at once.
+dm.post("/dm/presence/leave", requireAuth, (req, res) => {
+  const endpoint = typeof req.body?.endpoint === "string" ? req.body.endpoint : "";
+  if (endpoint.startsWith("https://") && endpoint.length <= 2048) markDeviceClosed(endpoint, req.user!.id);
+  res.status(204).end();
 });
 
 // Which members of a conversation are online now. Only members may ask, and only about members of that conversation.

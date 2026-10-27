@@ -1,0 +1,26 @@
+/* Small responses to taps and loads. Turned off for people who ask for reduced motion. */
+
+.action-button.liked svg {
+  animation: like-pop 0.36s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes like-pop {
+  0% { transform: scale(0.6); }
+  60% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+
+/* Pictures fade in once their bytes arrive, so a slow load does not look like a blank hole. */
+.media-frame img {
+  animation: picture-in 0.3s ease both;
+}
+@keyframes picture-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .action-button.liked svg,
+  .media-frame img {
+    animation: none;
+  }
+}

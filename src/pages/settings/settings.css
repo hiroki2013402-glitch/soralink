@@ -1,0 +1,36 @@
+/* Settings screen. Cards with a row per choice, and switches that slide when toggled. */
+
+.settings-page{display:flex;flex-direction:column;gap:18px;max-width:640px;margin:0 auto;padding:4px 2px 40px;animation:fade-up .3s both}
+.settings-heading h1{margin:4px 0 0;font-size:24px;letter-spacing:-.6px;color:var(--ink,#1c1e21)}
+.settings-eyebrow{margin:0;font-size:11px;font-weight:800;letter-spacing:1.2px;color:#65676b}
+
+.settings-section h2{display:flex;align-items:center;gap:8px;margin:0 4px 8px;font-size:13px;font-weight:800;color:#65676b}
+.settings-card{background:#fff;border:1px solid #e4e6eb;border-radius:14px;overflow:hidden;box-shadow:0 1px 2px #00000010}
+
+.settings-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;border-top:1px solid #f0f2f5}
+.settings-card > :first-child{border-top:0}
+.settings-row-text{display:flex;flex-direction:column;gap:3px;min-width:0}
+.settings-row-text label{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:700;color:#1c1e21;cursor:default}
+.settings-row-text small{font-size:12px;line-height:1.6;color:#65676b}
+
+.settings-account{display:flex;align-items:center;gap:12px;padding:16px}
+.settings-account-text{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.settings-account-text strong{font-size:15px;color:#1c1e21}
+.settings-account-text small{font-size:12px;color:#65676b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.settings-switch{position:relative;flex-shrink:0;width:48px;height:28px;padding:0;border:0;border-radius:999px;background:#c9ccd1;transition:background .22s ease}
+.settings-switch span{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0003;transition:transform .24s cubic-bezier(.34,1.4,.64,1)}
+.settings-switch.on{background:#0866ff}
+.settings-switch.on span{transform:translateX(20px)}
+.settings-switch:disabled{opacity:.5;cursor:not-allowed}
+.settings-switch:focus-visible{outline:3px solid #9bbcf8;outline-offset:2px}
+
+.settings-danger{display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 14px;border:0;border-radius:10px;background:#fdecef;color:#c4123e;font-size:14px;font-weight:700;cursor:pointer;transition:background .15s,transform .15s}
+.settings-danger:hover{background:#fad3dc}
+.settings-danger:active{transform:scale(.98)}
+
+.settings-row.static{justify-content:flex-start}
+
+@media (prefers-reduced-motion:reduce){
+  .settings-page,.settings-switch,.settings-switch span{animation:none;transition:none}
+}

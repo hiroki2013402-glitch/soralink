@@ -1,4 +1,4 @@
-import { Bell, House, MessageCircle, Plus, Search } from "lucide-react";
+import { Bell, House, MessageCircle, Plus, Search, Settings } from "lucide-react";
 import Avatar from "../Avatar";
 import CountBadge from "./CountBadge";
 import type { Tab } from "../../lib/route";
@@ -22,6 +22,7 @@ export default function SideNav({ user, activeTab, unread, dmUnread, onOpenTab }
       <button className={activeTab === "create" ? "selected" : ""} onClick={() => onOpenTab("create")}><Plus size={21} /><span>投稿を作成</span></button>
       <button className={activeTab === "notifications" ? "selected" : ""} onClick={() => onOpenTab("notifications")}><Bell size={21} /><span>通知</span><CountBadge count={unread} /></button>
       <button className={activeTab === "profile" ? "selected" : ""} onClick={() => onOpenTab("profile")}><Avatar url={user.avatar_url} name={user.display_name} size="small" /><span>マイページ</span></button>
+      <button className={activeTab === "settings" ? "selected" : ""} onClick={() => onOpenTab("settings")}><Settings size={21} /><span>設定</span></button>
       <div className="sidebar-divider" />
       <div className="sidebar-user"><Avatar url={user.avatar_url} name={user.display_name} size="small" /><span><strong>{user.display_name}</strong><small>SoraLink</small></span></div>
     </aside>

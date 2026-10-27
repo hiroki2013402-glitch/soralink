@@ -125,7 +125,6 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const [sendingPhoto, setSendingPhoto] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [onlineIds, setOnlineIds] = useState<string[]>([]);
   const [infoOpen, setInfoOpen] = useState(false);
@@ -360,11 +359,40 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   const rows = useMemo(() => buildRows(messages), [messages]);
   const messageById = useMemo(() => new Map(messages.map(m => [m.id, m] as [string, DmMessage])), [messages]);
 
-  // Online recipients receive the text over the socket before the database save. Offline recipients get the saved row as before.
+  // Swaps the message that was shown while sending for the copy the server saved. A realtime copy of the same message is not shown twice.
+  const replaceMessage = useCallback((oldId: string, saved: DmMessage) => {
+    setDetail(prev => {
+      if (!prev) return prev;
+      if (!prev.messages.some(m => m.id === oldId)) {
+        return prev.messages.some(m => m.id === saved.id) ? prev : { ...prev, messages: [...prev.messages, saved] };
+      }
+      const messages = prev.messages
+        .filter(m => m.id === oldId || m.id !== saved.id)
+        .map(m => (m.id === oldId ? saved : m));
+      return { ...prev, messages };
+    });
+  }, []);
+
+  // Takes a message that did not send back into the composer, so typed text is never lost. Photos are dropped and the person picks again.
+  const restoreFailed = (message: DmMessage) => {
+    pendingRef.current.delete(message.id);
+    removeMessage(message.id);
+    if (message.kind === "image") {
+      if (message.image_url?.startsWith("blob:")) URL.revokeObjectURL(message.image_url);
+      onNotice("写真を送信できませんでした。もう一度選んでください。");
+      return;
+    }
+    const text = message.body ?? "";
+    setDraft(v => (v.trim() ? `${v}\n${text}` : text));
+    inputRef.current?.focus();
+  };
+
+  // The message appears at once with a "sending" mark. Online recipients get it over the socket, and the save confirms it.
+  // A message that fails stays on screen as "not sent" until the person puts it back in the composer.
   const sendText = async () => {
     if (editing) return void saveEdit();
     const body = draft.trim();
-    if (!body || sending) return;
+    if (!body) return;
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const replyId = replyTo?.id ?? null;
@@ -373,38 +401,26 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
       .map(m => m.id);
 
     pendingRef.current.add(id);
-    setSending(true);
-    const shownLive = recipients.length > 0 && await sendLiveDm(
-      conversationId,
-      { id, conversation_id: conversationId, sender_id: user.id, created_at: createdAt, kind: "text", body, reply_to: replyId },
-      recipients
-    );
-    if (shownLive) {
-      setDraft(v => (v === body ? "" : v));
-      setReplyTo(v => (v?.id === replyId ? null : v));
-      appendMessage({ id, sender_id: user.id, created_at: createdAt, kind: "text", body, image_url: null, reply_to: replyId, edited_at: null, reactions: [] });
-    }
+    appendMessage({ id, sender_id: user.id, created_at: createdAt, kind: "text", body, image_url: null, reply_to: replyId, edited_at: null, reactions: [], status: "sending" });
+    setDraft("");
+    setReplyTo(null);
 
+    const live = recipients.length > 0
+      ? sendLiveDm(conversationId, { id, conversation_id: conversationId, sender_id: user.id, created_at: createdAt, kind: "text", body, reply_to: replyId }, recipients).catch(() => false)
+      : Promise.resolve(false);
     try {
       const r = await api<{ message: DmMessage }>(`/dm/conversations/${encodeURIComponent(conversationId)}/messages`, {
         method: "POST",
         body: JSON.stringify({ id, body, replyTo: replyId })
       });
-      if (!shownLive) {
-        setDraft(v => (v === body ? "" : v));
-        setReplyTo(v => (v?.id === replyId ? null : v));
-        appendMessage(r.message);
-      }
-    } catch (e) {
-      if (shownLive) {
-        removeMessage(id);
-        setDraft(v => (v ? v : body));
-        void retractLiveDm(conversationId, id, recipients);
-      }
-      onNotice(errorMessage(e, "メッセージを送信できませんでした"));
-    } finally {
+      replaceMessage(id, r.message);
       pendingRef.current.delete(id);
-      setSending(false);
+    } catch (e) {
+      patchMessage(id, { status: "failed" });
+      onNotice(errorMessage(e, "メッセージを送信できませんでした"));
+      // Members who already saw it over the socket are told to drop it, so nobody keeps a copy the database does not have.
+      void live.then(shown => { if (shown) void retractLiveDm(conversationId, id, recipients); });
+    } finally {
       inputRef.current?.focus();
     }
   };
@@ -521,6 +537,8 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
   };
   const startPress = (message: DmMessage, e: ReactPointerEvent) => {
     cancelPress();
+    // A message that is still sending has no saved copy yet, so it has no actions.
+    if (message.status) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     suppressClickRef.current = false;
     pressRef.current = {
@@ -557,18 +575,23 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
     if (!file) return;
     if (!file.type.startsWith("image/")) return onNotice("画像ファイルを選択してください。");
     const replyId = replyTo?.id ?? null;
-    setSendingPhoto(true);
+    const tempId = crypto.randomUUID();
+    // The photo appears straight away from the local file, and is swapped for the saved one when the upload finishes.
+    const previewUrl = URL.createObjectURL(file);
+    pendingRef.current.add(tempId);
+    appendMessage({ id: tempId, sender_id: user.id, created_at: new Date().toISOString(), kind: "image", body: null, image_url: previewUrl, reply_to: replyId, edited_at: null, reactions: [], status: "sending" });
+    setReplyTo(v => (v?.id === replyId ? null : v));
     try {
       const body = new FormData();
       body.append("file", await optimizeImage(file, 1920));
       if (replyId) body.append("replyTo", replyId);
       const r = await api<{ message: DmMessage }>(`/dm/conversations/${encodeURIComponent(conversationId)}/messages`, { method: "POST", body });
-      appendMessage(r.message);
-      setReplyTo(v => (v?.id === replyId ? null : v));
+      replaceMessage(tempId, r.message);
+      pendingRef.current.delete(tempId);
+      URL.revokeObjectURL(previewUrl);
     } catch (err) {
+      patchMessage(tempId, { status: "failed" });
       onNotice(errorMessage(err, "画像を送信できませんでした"));
-    } finally {
-      setSendingPhoto(false);
     }
   };
 
@@ -677,12 +700,12 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
           const isNew = freshIdsRef.current.has(message.id);
           const sender = people.get(message.sender_id);
           const isPhoto = message.kind === "image" && message.image_url;
-          const isReceiptTarget = mine && lastMine?.id === message.id;
+          const isReceiptTarget = mine && lastMine?.id === message.id && !message.status;
           const readers = isReceiptTarget ? readCount(message, conversation.members) : 0;
           const quoted = message.reply_to ? messageById.get(message.reply_to) : undefined;
           const groups = reactionGroups(message.reactions, user.id);
           return (
-            <div key={row.key} data-mid={message.id} className={`dm-msg ${mine ? "mine" : "theirs"} ${first ? "first" : ""} ${last ? "last" : ""} ${isNew ? "is-new" : ""}`}>
+            <div key={row.key} data-mid={message.id} className={`dm-msg ${mine ? "mine" : "theirs"} ${first ? "first" : ""} ${last ? "last" : ""} ${isNew ? "is-new" : ""} ${message.status ? `is-${message.status}` : ""}`}>
               {!mine && (
                 <span className="dm-msg-avatar" aria-hidden={!last}>
                   {last && <Avatar url={sender?.avatar_url ?? null} name={sender?.display_name ?? ""} size="small" />}
@@ -711,7 +734,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
                     onPointerUp={cancelPress}
                     onPointerLeave={cancelPress}
                     onPointerCancel={cancelPress}
-                    onContextMenu={e => { e.preventDefault(); setMenuMessage(message); }}
+                    onContextMenu={e => { e.preventDefault(); if (!message.status) setMenuMessage(message); }}
                   >
                     <img
                       src={message.image_url!}
@@ -729,7 +752,7 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
                     onPointerUp={cancelPress}
                     onPointerLeave={cancelPress}
                     onPointerCancel={cancelPress}
-                    onContextMenu={e => { e.preventDefault(); setMenuMessage(message); }}
+                    onContextMenu={e => { e.preventDefault(); if (!message.status) setMenuMessage(message); }}
                   >
                     <span
                       onClickCapture={e => {
@@ -757,6 +780,12 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
                   </div>
                 )}
                 {message.edited_at && <small className="dm-edited">編集済み</small>}
+                {message.status === "sending" && <small className="dm-status">送信中…</small>}
+                {message.status === "failed" && (
+                  <button type="button" className="dm-status dm-status-failed" onClick={() => restoreFailed(message)}>
+                    送信できませんでした。タップして入力に戻す
+                  </button>
+                )}
                 {isReceiptTarget && (
                   <small
                     className={`dm-receipt ${readers > 0 ? "is-read" : ""}`}
@@ -799,11 +828,11 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
             type="button"
             className="dm-icon-btn dm-photo-btn"
             onClick={() => fileRef.current?.click()}
-            disabled={sendingPhoto || Boolean(editing)}
+            disabled={Boolean(editing)}
             aria-label="写真を送信"
             title="写真を送信"
           >
-            {sendingPhoto ? <LoaderCircle size={20} className="spin" /> : <ImagePlus size={22} />}
+            <ImagePlus size={22} />
           </button>
           <input
             ref={fileRef}

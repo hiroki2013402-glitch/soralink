@@ -30,6 +30,7 @@ type Props = {
   onToggleFollow: (id: string) => void;
   onOpenRelations: (type: "followers" | "following") => void;
   onOpenCloseFriends: () => void;
+  onOpenSettings: () => void;
 };
 
 // Profile tab: header (cover, avatar, follow/edit), stats, and the user's posts.
@@ -57,6 +58,7 @@ export default function ProfilePage(props: Props) {
               <>
                 <button className="outline-small" onClick={props.onOpenCloseFriends}><Star size={15} />親しい友達</button>
                 <button className="outline-small" onClick={props.onStartEdit}><Settings size={15} />プロフィールを編集</button>
+                <button className="outline-small" onClick={props.onOpenSettings}><Settings size={14} />設定</button>
                 <button className="outline-small logout-small" onClick={props.onLogout}><LogOut size={14} />ログアウト</button>
               </>
             ) : (

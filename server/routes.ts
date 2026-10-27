@@ -4,6 +4,7 @@ import { z } from "zod";
 import multer from "multer";
 import { db } from "./db.js";
 import { requireAuth } from "./auth.js";
+import { settingsFor } from "./settings.js";
 import { canSeePost, resolveViewer, VISIBILITIES, VISIBLE_TO_SQL, visibleArgs } from "./visibility.js";
 import { deleteVideoForPost, mediaUrlForVideo } from "./videos.js";
 import { extractHashtags, extractMentionNames } from "./richText.js";
@@ -62,43 +63,77 @@ function writeMediaCache(id: string, value: { mime: string; body: Buffer }) {
   }
 }
 
+// Metadata per media id: type, thumbnail, and the post it is attached to. Kept for a minute, so a visibility change
+// still takes effect quickly, while a busy feed does not repeat two lookups for every picture.
+const META_TTL_MS = 60_000;
+const META_CACHE_MAX = 5000;
+type MediaMeta = { thumbId: string | null; post: { user_id: string; visibility: string } | null; at: number };
+const metaCache = new Map<string, MediaMeta>();
+
+async function mediaMeta(id: string): Promise<MediaMeta | null> {
+  const hit = metaCache.get(id);
+  if (hit && Date.now() - hit.at < META_TTL_MS) return hit;
+  const r = await db.execute({ sql: "SELECT thumb_id FROM media_assets WHERE id=?", args: [id] });
+  if (!r.rows.length) return null;
+  // Attached when a post uses this file, or when this file is the thumbnail of a post's file.
+  const attached = await db.execute({
+    sql: `SELECT p.user_id, p.visibility FROM posts p
+          WHERE p.media_url = ? OR p.media_url IN (SELECT '/api/media/' || a.id FROM media_assets a WHERE a.thumb_id = ?)
+          LIMIT 1`,
+    args: [`/api/media/${id}`, id]
+  });
+  const meta: MediaMeta = {
+    thumbId: r.rows[0].thumb_id ? String(r.rows[0].thumb_id) : null,
+    post: attached.rows.length ? { user_id: String(attached.rows[0].user_id), visibility: String(attached.rows[0].visibility) } : null,
+    at: Date.now()
+  };
+  if (metaCache.size >= META_CACHE_MAX) metaCache.delete(metaCache.keys().next().value as string);
+  metaCache.set(id, meta);
+  return meta;
+}
+
+// Concurrent requests for the same uncached picture share one database read instead of each reading every chunk.
+const bodyLoads = new Map<string, Promise<{ mime: string; body: Buffer } | null>>();
+
+function loadMedia(servedId: string): Promise<{ mime: string; body: Buffer } | null> {
+  const cached = readMediaCache(servedId);
+  if (cached) return Promise.resolve(cached);
+  const running = bodyLoads.get(servedId);
+  if (running) return running;
+  const load = (async () => {
+    const meta = await db.execute({ sql: "SELECT mime_type FROM media_assets WHERE id=?", args: [servedId] });
+    if (!meta.rows.length) return null;
+    const chunks = await db.execute({ sql: "SELECT data FROM media_chunks WHERE media_id=? ORDER BY chunk_index", args: [servedId] });
+    const body = Buffer.concat(chunks.rows.map(({ data }) => {
+      if (!(data instanceof ArrayBuffer)) throw new TypeError("Stored media chunk is not binary data.");
+      return Buffer.from(data);
+    }));
+    const value = { mime: String(meta.rows[0].mime_type), body };
+    writeMediaCache(servedId, value);
+    return value;
+  })().finally(() => bodyLoads.delete(servedId));
+  bodyLoads.set(servedId, load);
+  return load;
+}
+
 api.get("/media/:id", async (req, res) => {
   try {
     const id = routeId(req.params.id) || "";
-    const r = await db.execute({ sql: "SELECT mime_type, size_bytes, thumb_id FROM media_assets WHERE id=?", args: [id] });
-    if (!r.rows.length) return res.status(404).end();
-    const row = r.rows[0];
-    // Attached when a post uses this file, or when this file is the thumbnail of a post's file.
-    const attached = await db.execute({
-      sql: `SELECT p.user_id, p.visibility FROM posts p
-            WHERE p.media_url = ? OR p.media_url IN (SELECT '/api/media/' || a.id FROM media_assets a WHERE a.thumb_id = ?)
-            LIMIT 1`,
-      args: [`/api/media/${id}`, id]
-    });
-    const restricted = attached.rows.length > 0 && attached.rows[0].visibility !== "public";
-    if (attached.rows.length && !(await canSeePost(await resolveViewer(req), String(attached.rows[0].user_id), String(attached.rows[0].visibility)))) return res.status(404).end();
+    const meta = await mediaMeta(id);
+    if (!meta) return res.status(404).end();
+    // Public posts need no viewer lookup. Restricted ones are checked for every request.
+    if (meta.post && meta.post.visibility !== "public" && !(await canSeePost(await resolveViewer(req), meta.post.user_id, meta.post.visibility))) return res.status(404).end();
+    const restricted = Boolean(meta.post && meta.post.visibility !== "public");
 
-    const servedId = req.query.size === "thumb" && row.thumb_id ? String(row.thumb_id) : id;
+    const servedId = req.query.size === "thumb" && meta.thumbId ? meta.thumbId : id;
     const etag = `"${servedId}"`;
     res.setHeader("Cache-Control", restricted ? "private, max-age=3600" : "public, max-age=86400, immutable");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("ETag", etag);
     if (req.headers["if-none-match"] === etag) return res.status(304).end();
 
-    let media = readMediaCache(servedId);
-    if (!media) {
-      const meta = servedId === id
-        ? row
-        : (await db.execute({ sql: "SELECT mime_type FROM media_assets WHERE id=?", args: [servedId] })).rows[0];
-      if (!meta) return res.status(404).end();
-      const chunks = await db.execute({ sql: "SELECT data FROM media_chunks WHERE media_id=? ORDER BY chunk_index", args: [servedId] });
-      const body = Buffer.concat(chunks.rows.map(({ data }) => {
-        if (!(data instanceof ArrayBuffer)) throw new TypeError("Stored media chunk is not binary data.");
-        return Buffer.from(data);
-      }));
-      media = { mime: String(meta.mime_type), body };
-      writeMediaCache(servedId, media);
-    }
+    const media = await loadMedia(servedId);
+    if (!media) return res.status(404).end();
     res.setHeader("Content-Type", media.mime);
     res.setHeader("Content-Length", String(media.body.length));
     res.end(media.body);
@@ -445,9 +480,43 @@ api.get("/users/:id", requireAuth, async(req,res)=>{
   }
 });
 
+// Likes can be toggled by one person on one post at most once every LIKE_MIN_GAP_MS,
+// and at most LIKE_WINDOW_MAX times in LIKE_WINDOW_MS. Requests over the limit are refused before touching the database.
+// Kept in process memory, like the other limiters in index.ts.
+const LIKE_MIN_GAP_MS = 3_000;
+const LIKE_WINDOW_MS = 10 * 60_000;
+const LIKE_WINDOW_MAX = 20;
+const likeToggles = new Map<string, number[]>();
+
+function likeAllowed(userId: string, postId: string): { ok: true } | { ok: false; retryAfterMs: number } {
+  const now = Date.now();
+  const key = `${userId}:${postId}`;
+  const recent = (likeToggles.get(key) ?? []).filter(at => now - at < LIKE_WINDOW_MS);
+  const last = recent[recent.length - 1];
+  if (last !== undefined && now - last < LIKE_MIN_GAP_MS) {
+    likeToggles.set(key, recent);
+    return { ok: false, retryAfterMs: LIKE_MIN_GAP_MS - (now - last) };
+  }
+  if (recent.length >= LIKE_WINDOW_MAX) {
+    likeToggles.set(key, recent);
+    return { ok: false, retryAfterMs: LIKE_WINDOW_MS - (now - recent[0]) };
+  }
+  recent.push(now);
+  likeToggles.set(key, recent);
+  if (likeToggles.size > 20_000) {
+    for (const [k, times] of likeToggles) if (!times.length || now - times[times.length - 1] > LIKE_WINDOW_MS) likeToggles.delete(k);
+  }
+  return { ok: true };
+}
+
 api.post("/posts/:id/like",requireAuth,async(req,res)=>{
   const id = routeId(req.params.id);
   if (!id) return res.status(400).json({error:"投稿IDが不正です。"});
+  const limit = likeAllowed(req.user!.id, id);
+  if (!limit.ok) {
+    res.setHeader("Retry-After", String(Math.ceil(limit.retryAfterMs / 1000)));
+    return res.status(429).json({error:"いいねの連打は制限されています。少し待ってからお試しください。", retryAfterMs: limit.retryAfterMs});
+  }
   try {
     if (!(await visiblePost(req.user!.id, id))) return res.status(404).json({error:"投稿が見つかりません。"});
     const p=await db.execute({sql:"SELECT user_id FROM posts WHERE id=?",args:[id]});
@@ -458,7 +527,7 @@ api.post("/posts/:id/like",requireAuth,async(req,res)=>{
       res.json({liked:false});
     }else{
       await db.execute({sql:"INSERT INTO likes(user_id,post_id,created_at) VALUES(?,?,?)",args:[req.user!.id,id,new Date().toISOString()]});
-      if(owner!==req.user!.id)await db.execute({sql:"INSERT INTO notifications(id,user_id,actor_id,kind,post_id,created_at) VALUES(?,?,?,?,?,?)",args:[crypto.randomUUID(),owner,req.user!.id,"like",id,new Date().toISOString()]});
+      if(owner!==req.user!.id&&(await settingsFor(owner)).notify_likes)await db.execute({sql:"INSERT INTO notifications(id,user_id,actor_id,kind,post_id,created_at) VALUES(?,?,?,?,?,?)",args:[crypto.randomUUID(),owner,req.user!.id,"like",id,new Date().toISOString()]});
       res.json({liked:true});
     }
   }catch{
@@ -506,7 +575,7 @@ api.post("/users/:id/follow",requireAuth,async(req,res)=>{
       return res.json({following:false});
     }
     await db.execute({sql:"INSERT INTO follows(follower_id,followed_id,created_at) VALUES(?,?,?)",args:[req.user!.id,id,new Date().toISOString()]});
-    await db.execute({sql:"INSERT INTO notifications(id,user_id,actor_id,kind,created_at) VALUES(?,?,?,?,?)",args:[crypto.randomUUID(),id,req.user!.id,"follow",new Date().toISOString()]});
+    if((await settingsFor(id)).notify_follows)await db.execute({sql:"INSERT INTO notifications(id,user_id,actor_id,kind,created_at) VALUES(?,?,?,?,?)",args:[crypto.randomUUID(),id,req.user!.id,"follow",new Date().toISOString()]});
     res.json({following:true});
   }catch{
     res.status(500).json({error:"フォローを処理できませんでした。"});

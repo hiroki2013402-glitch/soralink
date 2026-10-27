@@ -57,9 +57,46 @@ push.post("/push/unsubscribe", requireAuth, async (req, res) => {
   }
 });
 
-// Sends one notification to every subscribed device of the given users.
-// Presence is not checked here: it is shared across all of a user's devices, so an open PC would otherwise silence the phone.
-// The service worker decides whether to show a sound-free banner when the app is already in front.
+// Browsers that have the app open right now. The app reports its own push endpoint with each presence heartbeat (every few seconds),
+// so a notification is skipped only on the device that is showing the app. Other devices of the same person still get it.
+// A device counts as open for DEVICE_WINDOW_MS after its last heartbeat, and stops counting at once when the page closes.
+const DEVICE_WINDOW_MS = 10_000;
+const OWNERSHIP_TTL_MS = 60_000;
+const activeDevices = new Map<string, { userId: string; at: number }>();
+const ownership = new Map<string, { userId: string; checkedAt: number }>();
+
+// Records that this browser's app is open. Only an endpoint that belongs to the caller counts.
+// Ownership is checked against the database once a minute, not on every heartbeat.
+export async function markDeviceActive(endpoint: string, userId: string) {
+  const known = ownership.get(endpoint);
+  const fresh = known && known.userId === userId && Date.now() - known.checkedAt < OWNERSHIP_TTL_MS;
+  if (!fresh) {
+    const owned = await db.execute({ sql: "SELECT 1 FROM push_subscriptions WHERE endpoint=? AND user_id=?", args: [endpoint, userId] });
+    if (!owned.rows.length) { ownership.delete(endpoint); return; }
+    ownership.set(endpoint, { userId, checkedAt: Date.now() });
+  }
+  const now = Date.now();
+  activeDevices.set(endpoint, { userId, at: now });
+  if (activeDevices.size > 10000) {
+    for (const [key, value] of activeDevices) if (now - value.at > DEVICE_WINDOW_MS) activeDevices.delete(key);
+  }
+  if (ownership.size > 10000) {
+    for (const [key, value] of ownership) if (now - value.checkedAt > OWNERSHIP_TTL_MS) ownership.delete(key);
+  }
+}
+
+// The page was closed: this device stops counting as open straight away.
+export function markDeviceClosed(endpoint: string, userId: string) {
+  if (activeDevices.get(endpoint)?.userId === userId) activeDevices.delete(endpoint);
+}
+
+function deviceIsOpen(endpoint: string, userId: string) {
+  const device = activeDevices.get(endpoint);
+  return Boolean(device && device.userId === userId && Date.now() - device.at < DEVICE_WINDOW_MS);
+}
+
+// Sends one notification to every subscribed device of the given users, except people who turned DM notifications off
+// and devices on which the app is open right now.
 // Subscriptions the push service reports as gone (404/410) are removed.
 export async function notifyDmRecipients(args: {
   recipients: string[];
@@ -71,17 +108,20 @@ export async function notifyDmRecipients(args: {
   const targets = args.recipients;
   if (!targets.length) return;
   try {
-    const found = await db.execute({
-      sql: `SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id IN (${targets.map(() => "?").join(",")})`,
-      args: targets
-    });
+    const marks = targets.map(() => "?").join(",");
+    const [found, muted] = await Promise.all([
+      db.execute({ sql: `SELECT endpoint, user_id, p256dh, auth FROM push_subscriptions WHERE user_id IN (${marks})`, args: targets }),
+      db.execute({ sql: `SELECT user_id FROM user_settings WHERE dm_push = 0 AND user_id IN (${marks})`, args: targets })
+    ]);
+    const mutedIds = new Set(muted.rows.map(row => String(row.user_id)));
     const payload = JSON.stringify({
       title: args.senderName,
       body: args.preview,
       url: `/page/messages/${encodeURIComponent(args.conversationId)}`,
       tag: `dm-${args.conversationId}`
     });
-    await Promise.all(found.rows.map(async row => {
+    const deliver = found.rows.filter(row => !mutedIds.has(String(row.user_id)) && !deviceIsOpen(String(row.endpoint), String(row.user_id)));
+    await Promise.all(deliver.map(async row => {
       const endpoint = String(row.endpoint);
       try {
         await webpush.sendNotification(

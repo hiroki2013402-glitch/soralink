@@ -27,7 +27,11 @@ import type { NewPost } from "../components/CreatePost";
 import { api } from "../lib/api";
 import { optimizeImage } from "../lib/images";
 import { errorMessage } from "../lib/errors";
-import { disablePush } from "../lib/push";
+import { currentEndpoint, disablePush } from "../lib/push";
+import { loadPrefs, savePrefs } from "../lib/preferences";
+import type { Prefs } from "../lib/preferences";
+import SettingsPage from "./settings/SettingsPage";
+import type { NotificationSettings } from "./settings/SettingsPage";
 import { parseRoute } from "../lib/route";
 import type { Route, Tab } from "../lib/route";
 import type { Announcement, Notice, Person, Post, SearchResults, User } from "../types";
@@ -49,6 +53,8 @@ export default function App() {
   const [dmUnread, setDmUnread] = useState(0);
   const [dmCounts, setDmCounts] = useState<Record<string, number>>({});
   const [liked, setLiked] = useState<Record<string, boolean>>({});
+  const [settings, setSettings] = useState<NotificationSettings | null>(null);
+  const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   // True while returning from Sennin Account: the 認証中 overlay stays until the first load finishes.
   const [authPending, setAuthPending] = useState(isAuthPending);
@@ -174,15 +180,32 @@ export default function App() {
   // Presence: tell the server this user is here. Sent while the tab is visible, so "online" means the app is open and in front.
   useEffect(() => {
     if (!user) return;
+    // The heartbeat carries this browser's push endpoint, so the server knows which device has the app open.
+    // The server counts a device as open for 10 seconds after its last heartbeat, so the beat is kept well inside that.
+    const HEARTBEAT_MS = 4000;
+    let endpoint: string | null = null;
     const beat = () => {
-      if (document.visibilityState === "visible") void api("/dm/presence", { method: "POST" }).catch(() => undefined);
+      if (document.visibilityState !== "visible") return;
+      void currentEndpoint()
+        .catch(() => null)
+        .then(found => {
+          endpoint = found;
+          return api("/dm/presence", { method: "POST", body: JSON.stringify({ endpoint: found }) }).catch(() => undefined);
+        });
+    };
+    // Closing the page tells the server straight away, instead of waiting for the heartbeat to lapse.
+    const closed = () => {
+      if (!endpoint) return;
+      navigator.sendBeacon("/api/dm/presence/leave", new Blob([JSON.stringify({ endpoint })], { type: "application/json" }));
     };
     beat();
-    const timer = window.setInterval(beat, 30000);
+    const timer = window.setInterval(beat, HEARTBEAT_MS);
     document.addEventListener("visibilitychange", beat);
+    window.addEventListener("pagehide", closed);
     return () => {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", beat);
+      window.removeEventListener("pagehide", closed);
     };
   }, [user?.id]);
 
@@ -264,16 +287,43 @@ export default function App() {
     go("/page/home");
   };
 
+  // Likes: a press is ignored while the last one is still being saved, and for a moment after it (the server allows one toggle every 3 seconds).
+  const LIKE_COOLDOWN_MS = 3_000;
+  const likeBusyRef = useRef<Map<string, number>>(new Map());
+  const likedRef = useRef(liked);
+  useEffect(() => { likedRef.current = liked; }, [liked]);
+
+  // Shows a like straight away, and moves the count by the change it causes.
+  const applyLike = (id: string, isLiked: boolean, change: number) => {
+    likedRef.current = { ...likedRef.current, [id]: isLiked };
+    setLiked(likedRef.current);
+    const bump = (list: Post[]) => list.map(p => p.id === id ? { ...p, likes_count: Math.max(0, Number(p.likes_count) + change) } : p);
+    setPosts(bump);
+    setProfilePosts(bump);
+    setResults(r => r ? { ...r, posts: bump(r.posts) } : r);
+  };
+
   const like = async (id: string) => {
     if (!user) return tell("いいねするにはログインしてください。");
+    const busySince = likeBusyRef.current.get(id);
+    if (busySince !== undefined && Date.now() - busySince < LIKE_COOLDOWN_MS) return tell("いいねは少し間を空けてお試しください。");
+    likeBusyRef.current.set(id, Number.POSITIVE_INFINITY);
+
+    const wasLiked = Boolean(likedRef.current[id]);
+    const delta = wasLiked ? -1 : 1;
+    applyLike(id, !wasLiked, delta);
     try {
       const r = await api<{ liked: boolean }>(`/posts/${id}/like`, { method: "POST" });
-      setLiked(v => ({ ...v, [id]: r.liked }));
-      const bump = (list: Post[]) => list.map(p => p.id === id ? { ...p, likes_count: Math.max(0, Number(p.likes_count) + (r.liked ? 1 : -1)) } : p);
-      setPosts(bump);
-      setProfilePosts(bump);
-      setResults(r => r ? { ...r, posts: bump(r.posts) } : r);
+      likeBusyRef.current.set(id, Date.now());
+      // The server has the final say. Correct the count if it did not make the change we showed.
+      if (r.liked !== !wasLiked) {
+        const serverDelta = r.liked === wasLiked ? 0 : (r.liked ? 1 : -1);
+        applyLike(id, r.liked, serverDelta - delta);
+      }
     } catch (e) {
+      // Refused (too many presses) keeps the cooldown; other failures allow an immediate retry.
+      likeBusyRef.current.set(id, Date.now());
+      applyLike(id, wasLiked, -delta);
       tell(errorMessage(e, "いいねできませんでした"));
     }
   };
@@ -391,6 +441,33 @@ export default function App() {
     } catch (e) {
       tell(errorMessage(e, "ログアウトできませんでした"));
     }
+  };
+
+  // Account notification settings: loaded for the signed-in user, changed optimistically and confirmed by the server.
+  useEffect(() => {
+    if (!user) { setSettings(null); return; }
+    api<{ settings: NotificationSettings }>("/me/settings")
+      .then(r => setSettings(r.settings))
+      .catch(() => setSettings(null));
+  }, [user?.id]);
+
+  const changeSettings = async (patch: Partial<NotificationSettings>) => {
+    const before = settings;
+    if (!before) return;
+    setSettings({ ...before, ...patch });
+    try {
+      const r = await api<{ settings: NotificationSettings }>("/me/settings", { method: "PATCH", body: JSON.stringify(patch) });
+      setSettings(r.settings);
+    } catch (e) {
+      setSettings(before);
+      tell(errorMessage(e, "設定を保存できませんでした"));
+    }
+  };
+
+  const changePrefs = (patch: Partial<Prefs>) => {
+    const next = { ...prefs, ...patch };
+    setPrefs(next);
+    savePrefs(next);
   };
 
   const openNotification = (n: Notice) => {
@@ -521,6 +598,20 @@ export default function App() {
               onToggleFollow={id => void toggleFollow(id)}
               onOpenRelations={type => void openRelations(type)}
               onOpenCloseFriends={() => setCloseFriendsOpen(true)}
+              onOpenSettings={() => go("/page/settings")}
+            />
+          )}
+
+          {activeTab === "settings" && (
+            <SettingsPage
+              user={user}
+              settings={settings}
+              prefs={prefs}
+              onChangeSettings={patch => void changeSettings(patch)}
+              onChangePrefs={changePrefs}
+              onEditProfile={() => void openProfile(user.id)}
+              onLogout={() => void logout()}
+              onNotice={tell}
             />
           )}
 
