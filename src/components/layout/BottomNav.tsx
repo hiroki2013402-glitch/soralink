@@ -25,7 +25,7 @@ export default function BottomNav({ activeTab, unread, dmUnread, onOpenTab }: Pr
       {NAV.map(([id, label, Icon]) => (
         <button key={id} className={activeTab === id ? "active" : ""} onClick={() => onOpenTab(id)} aria-label={label}>
           <span className="nav-icon">{id === "create" ? <span className="create-plus"><Icon size={22} /></span> : <Icon size={21} />}</span>
-          <span>{label}</span>
+          <span className="nav-label">{label}</span>
           {id === "notifications" && <CountBadge count={unread} />}
           {id === "messages" && <CountBadge count={dmUnread} />}
         </button>

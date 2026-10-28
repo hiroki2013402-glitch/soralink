@@ -18,6 +18,10 @@ import { settingsRouter } from "./settings.js";
 import { videos } from "./videos.js";
 import { initializeVideoDatabase, isVideoDatabaseReady } from "./videoDb.js";
 
+if (config.adminPassword && !config.adminSenninId) {
+  console.warn("[admin] ADMIN_SENNIN_ID が未設定のため、管理者ログインは完了できません。");
+}
+
 const app = express();
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(currentDir, "..");

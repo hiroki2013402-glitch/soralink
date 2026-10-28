@@ -96,7 +96,11 @@ export function registerOAuthRoutes(app: Express) {
         res.clearCookie(ADMIN_GATE_COOKIE, { ...cookieOptions, maxAge: undefined });
         // Admin rights go only to the account named in ADMIN_SENNIN_ID. Without that setting, nobody can become admin.
         if (!config.adminSenninId || user.id !== `sennin:${config.adminSenninId}`) {
-          adminError = "このアカウントは管理者に設定されていないため、管理者権限は付与されませんでした。";
+          // Tell the admin which id to put in ADMIN_SENNIN_ID, instead of only saying the login failed.
+          const yourId = user.id.replace(/^sennin:/, "");
+          adminError = config.adminSenninId
+            ? `このアカウント（ID: ${yourId}）は管理者ではありません。管理者にする仙人アカウントでログインし直してください。`
+            : `管理者IDが未設定です。サーバーの環境変数 ADMIN_SENNIN_ID に「${yourId}」を設定して再デプロイしてください。`;
         } else {
           grantAdmin = true;
         }

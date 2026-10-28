@@ -799,3 +799,11 @@ button.x-detail-media{cursor:zoom-in}
 .x-post-media{background:#eef2f7}
 .x-post-media img{background:#eef2f7}
 .reduce-motion *,.reduce-motion *::before,.reduce-motion *::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}
+
+
+/* Phones: the bottom bar shows icons only, and the top bar shows no page title (labels stay in aria-label). */
+@media (max-width:620px){
+  .bottom-nav .nav-label{display:none}
+  .bottom-nav button{justify-content:center}
+  .mobile-page-title{display:none}
+}
