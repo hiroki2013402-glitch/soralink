@@ -94,7 +94,8 @@ export function registerOAuthRoutes(app: Express) {
       let adminError = "";
       if (adminFlow) {
         res.clearCookie(ADMIN_GATE_COOKIE, { ...cookieOptions, maxAge: undefined });
-        if (config.adminSenninId && user.id !== `sennin:${config.adminSenninId}`) {
+        // Admin rights go only to the account named in ADMIN_SENNIN_ID. Without that setting, nobody can become admin.
+        if (!config.adminSenninId || user.id !== `sennin:${config.adminSenninId}`) {
           adminError = "このアカウントは管理者に設定されていないため、管理者権限は付与されませんでした。";
         } else {
           grantAdmin = true;

@@ -22,13 +22,15 @@ type Props = {
   onAddMembers: () => void;
   onLeave: () => void;
   onNotice: (text: string) => void;
+  // Admins manage a group they are not in, so they have no membership to leave.
+  canLeave?: boolean;
 };
 
 const TITLE_MAX = 60;
 const DESCRIPTION_MAX = 200;
 
 // Group information: icon, name, description, members with roles, and the owner/sub-admin actions.
-export default function GroupInfoSheet({ meId, conversation, onClose, onChanged, onAddMembers, onLeave, onNotice }: Props) {
+export default function GroupInfoSheet({ meId, conversation, onClose, onChanged, onAddMembers, onLeave, onNotice, canLeave = true }: Props) {
   const myRole: DmRole = conversation.my_role ?? "member";
   const canManage = myRole !== "member";
   const enc = encodeURIComponent(conversation.id);
@@ -107,6 +109,23 @@ export default function GroupInfoSheet({ meId, conversation, onClose, onChanged,
     }
   };
 
+  // Hands the owner role to another member. The current owner becomes a sub-admin.
+  const transferOwner = async (member: DmMember) => {
+    if (!window.confirm(`${member.display_name}さんにオーナーを譲りますか？ 今のオーナーはサブ管理人になります。`)) return;
+    setRoleBusyId(member.id);
+    try {
+      await api(`/dm/conversations/${enc}/owner`, {
+        method: "POST",
+        body: JSON.stringify({ userId: member.id })
+      });
+      onChanged();
+    } catch (e) {
+      onNotice(errorMessage(e, "オーナーを変更できませんでした"));
+    } finally {
+      setRoleBusyId(null);
+    }
+  };
+
   const groupName = conversation.title || conversation.members.map(m => m.display_name).join("、");
   const memberCount = conversation.members.length;
 
@@ -159,6 +178,7 @@ export default function GroupInfoSheet({ meId, conversation, onClose, onChanged,
               const role: DmRole = m.role ?? "member";
               const canPromote = canManage && role === "member";
               const canDemote = myRole === "owner" && role === "sub_admin";
+              const canTransfer = myRole === "owner" && role !== "owner";
               const busy = roleBusyId === m.id;
               return (
                 <li key={m.id} className="dm-info-member">
@@ -172,6 +192,11 @@ export default function GroupInfoSheet({ meId, conversation, onClose, onChanged,
                       {busy ? <LoaderCircle className="spin" size={14} /> : "サブ管理人にする"}
                     </button>
                   )}
+                  {canTransfer && (
+                    <button type="button" className="dm-outline-btn" onClick={() => void transferOwner(m)} disabled={busy}>
+                      オーナーにする
+                    </button>
+                  )}
                   {canDemote && (
                     <button type="button" className="dm-outline-btn" onClick={() => void changeRole(m, "member")} disabled={busy}>
                       {busy ? <LoaderCircle className="spin" size={14} /> : "メンバーに戻す"}
@@ -182,7 +207,7 @@ export default function GroupInfoSheet({ meId, conversation, onClose, onChanged,
             })}
           </ul>
 
-          <button type="button" className="dm-leave-btn" onClick={onLeave}><LogOut size={16} />グループから退出</button>
+          {canLeave && <button type="button" className="dm-leave-btn" onClick={onLeave}><LogOut size={16} />グループから退出</button>}
         </div>
 
         {iconFile && (

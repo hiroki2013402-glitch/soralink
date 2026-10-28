@@ -1,12 +1,13 @@
 import crypto from "node:crypto";
 import { Router } from "express";
-import type { Request, Response } from "express";
+import type { Request, RequestHandler, Response } from "express";
 import multer from "multer";
 import { z } from "zod";
 import { requireAuth } from "./auth.js";
 import { db } from "./db.js";
 import { mintRealtimeToken, sb, supabaseAnonKey, supabaseUrl } from "./supabase.js";
 import { markDeviceActive, markDeviceClosed, notifyDmRecipients } from "./push.js";
+import { audit } from "./admin.js";
 
 // Direct messages. Conversations, members, messages and notes live in Supabase; the user directory stays in Turso.
 export const dm = Router();
@@ -137,6 +138,32 @@ async function groupRole(conversationId: string, userId: string): Promise<Role |
   if (conversation.error) throw conversation.error;
   if (!conversation.data?.is_group) return null;
   return mine.role;
+}
+
+// The caller's authority over a conversation's settings and members.
+// Returns null when the conversation does not exist or the caller may not see it, "direct" for 1:1 chats,
+// and otherwise the role. An admin acts as the group owner in every group, even one they are not a member of.
+async function manageRole(conversationId: string, me: string, isAdmin: boolean): Promise<Role | "direct" | null> {
+  if (!isUuid(conversationId)) return null;
+  const conversation = await sb.from("dm_conversations").select("is_group").eq("id", conversationId).maybeSingle();
+  if (conversation.error) throw conversation.error;
+  if (!conversation.data) return null;
+  const mine = await memberRow(conversationId, me);
+  if (!conversation.data.is_group) return mine ? "direct" : null;
+  if (isAdmin) return "owner";
+  return mine ? mine.role : null;
+}
+
+// Admins act as the group owner. Every successful group change they make is written to the audit log.
+function auditAdminGroupAction(action: string): RequestHandler {
+  return (req, res, next) => {
+    res.on("finish", () => {
+      if (req.isAdmin && res.statusCode < 300) {
+        void audit(req.user!.id, action, param(req, "id"), `${req.method} ${req.path}`).catch(() => undefined);
+      }
+    });
+    next();
+  };
 }
 
 const iconUrlFor = (conversationId: string, path: string) =>
@@ -645,15 +672,15 @@ dm.post("/dm/conversations/:id/leave", requireAuth, async (req, res) => {
 // Owners and sub-admins may change these. Sub-admins cannot remove other sub-admins; only the owner can.
 
 // Changes the group name and/or description. An empty string clears the field.
-dm.patch("/dm/conversations/:id/info", requireAuth, async (req, res) => {
+dm.patch("/dm/conversations/:id/info", requireAuth, auditAdminGroupAction("dm_group_info"), async (req, res) => {
   const parsed = infoSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "入力を確認してください。" });
   const me = req.user!.id;
   const id = param(req, "id");
   try {
-    if (!(await isMember(id, me))) return res.status(404).json({ error: "会話が見つかりません。" });
-    const role = await groupRole(id, me);
-    if (role === null) return res.status(400).json({ error: "個人チャットの情報は変更できません。" });
+    const role = await manageRole(id, me, req.isAdmin === true);
+    if (role === null) return res.status(404).json({ error: "会話が見つかりません。" });
+    if (role === "direct") return res.status(400).json({ error: "個人チャットの情報は変更できません。" });
     if (role === "member") return res.status(403).json({ error: "グループ情報を変更できるのはオーナーとサブ管理人です。" });
 
     const patch: { title?: string | null; description?: string | null } = {};
@@ -673,7 +700,7 @@ dm.patch("/dm/conversations/:id/info", requireAuth, async (req, res) => {
 dm.get("/dm/conversations/:id/icon", requireAuth, async (req, res) => {
   const id = param(req, "id");
   try {
-    if (!(await isMember(id, req.user!.id))) return res.status(404).end();
+    if (!req.isAdmin && !(await isMember(id, req.user!.id))) return res.status(404).end();
     const conversation = await sb.from("dm_conversations").select("icon_path").eq("id", id).maybeSingle();
     if (conversation.error) throw conversation.error;
     if (!conversation.data?.icon_path) return res.status(404).end();
@@ -688,16 +715,16 @@ dm.get("/dm/conversations/:id/icon", requireAuth, async (req, res) => {
 });
 
 // Replaces the group icon with one image (multipart "file"). The previous icon is deleted from storage.
-dm.put("/dm/conversations/:id/icon", requireAuth, uploadImage, async (req, res) => {
+dm.put("/dm/conversations/:id/icon", requireAuth, uploadImage, auditAdminGroupAction("dm_group_icon"), async (req, res) => {
   const me = req.user!.id;
   const id = param(req, "id");
   const file = req.file;
   if (!file) return res.status(400).json({ error: "画像を選択してください。" });
   if (!hasImageSignature(file.buffer, file.mimetype)) return res.status(400).json({ error: "画像の内容と形式が一致しません。" });
   try {
-    if (!(await isMember(id, me))) return res.status(404).json({ error: "会話が見つかりません。" });
-    const role = await groupRole(id, me);
-    if (role === null) return res.status(400).json({ error: "個人チャットのアイコンは変更できません。" });
+    const role = await manageRole(id, me, req.isAdmin === true);
+    if (role === null) return res.status(404).json({ error: "会話が見つかりません。" });
+    if (role === "direct") return res.status(400).json({ error: "個人チャットのアイコンは変更できません。" });
     if (role === "member") return res.status(403).json({ error: "アイコンを変更できるのはオーナーとサブ管理人です。" });
 
     const path = `${id}/icon-${crypto.randomUUID()}.${IMAGE_EXTENSIONS.get(file.mimetype)}`;
@@ -718,15 +745,15 @@ dm.put("/dm/conversations/:id/icon", requireAuth, uploadImage, async (req, res) 
 });
 
 // Adds members to a group as plain members. Anyone already in the group is skipped.
-dm.post("/dm/conversations/:id/members", requireAuth, async (req, res) => {
+dm.post("/dm/conversations/:id/members", requireAuth, auditAdminGroupAction("dm_group_add_members"), async (req, res) => {
   const parsed = addMembersSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "追加する相手を選択してください。" });
   const me = req.user!.id;
   const id = param(req, "id");
   try {
-    if (!(await isMember(id, me))) return res.status(404).json({ error: "会話が見つかりません。" });
-    const role = await groupRole(id, me);
-    if (role === null) return res.status(400).json({ error: "個人チャットにはメンバーを追加できません。" });
+    const role = await manageRole(id, me, req.isAdmin === true);
+    if (role === null) return res.status(404).json({ error: "会話が見つかりません。" });
+    if (role === "direct") return res.status(400).json({ error: "個人チャットにはメンバーを追加できません。" });
     if (role === "member") return res.status(403).json({ error: "メンバーを追加できるのはオーナーとサブ管理人です。" });
 
     const current = await sb.from("dm_members").select("user_id").eq("conversation_id", id);
@@ -753,16 +780,16 @@ dm.post("/dm/conversations/:id/members", requireAuth, async (req, res) => {
 });
 
 // Sets sub-admin or member. Owner and sub-admins can promote; only the owner can demote. The owner's role cannot change here.
-dm.patch("/dm/conversations/:id/members/:userId/role", requireAuth, async (req, res) => {
+dm.patch("/dm/conversations/:id/members/:userId/role", requireAuth, auditAdminGroupAction("dm_group_role"), async (req, res) => {
   const parsed = roleSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "役職を選択してください。" });
   const me = req.user!.id;
   const id = param(req, "id");
   const target = param(req, "userId");
   try {
-    if (!(await isMember(id, me))) return res.status(404).json({ error: "会話が見つかりません。" });
-    const myRole = await groupRole(id, me);
-    if (myRole === null) return res.status(400).json({ error: "個人チャットには役職がありません。" });
+    const myRole = await manageRole(id, me, req.isAdmin === true);
+    if (myRole === null) return res.status(404).json({ error: "会話が見つかりません。" });
+    if (myRole === "direct") return res.status(400).json({ error: "個人チャットには役職がありません。" });
     if (myRole === "member") return res.status(403).json({ error: "役職を変更できるのはオーナーとサブ管理人です。" });
 
     const theirs = await memberRow(id, target);
@@ -776,6 +803,44 @@ dm.patch("/dm/conversations/:id/members/:userId/role", requireAuth, async (req, 
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: "役職を変更できませんでした。" });
+  }
+});
+
+// Hands the group to another member. Only the owner may do this; an admin counts as the owner.
+// The previous owner becomes a sub-admin. Ownership is moved in two steps because one owner per group is enforced by the database.
+const transferSchema = z.object({ userId: z.string().min(1).max(200) });
+dm.post("/dm/conversations/:id/owner", requireAuth, auditAdminGroupAction("dm_group_owner"), async (req, res) => {
+  const parsed = transferSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "オーナーにする相手を選択してください。" });
+  const me = req.user!.id;
+  const id = param(req, "id");
+  const target = parsed.data.userId;
+  try {
+    const myRole = await manageRole(id, me, req.isAdmin === true);
+    if (myRole === null) return res.status(404).json({ error: "会話が見つかりません。" });
+    if (myRole === "direct") return res.status(400).json({ error: "個人チャットにはオーナーがいません。" });
+    if (myRole !== "owner") return res.status(403).json({ error: "オーナーを変更できるのはオーナーだけです。" });
+
+    const theirs = await memberRow(id, target);
+    if (!theirs) return res.status(404).json({ error: "メンバーが見つかりません。" });
+    if (theirs.role === "owner") return res.json({ ok: true });
+
+    const current = await sb.from("dm_members").select("user_id").eq("conversation_id", id).eq("role", "owner").maybeSingle();
+    if (current.error) throw current.error;
+    const previousOwner = current.data ? String(current.data.user_id) : null;
+    if (previousOwner) {
+      const stepped = await sb.from("dm_members").update({ role: "sub_admin" }).eq("conversation_id", id).eq("user_id", previousOwner);
+      if (stepped.error) throw stepped.error;
+    }
+    const promoted = await sb.from("dm_members").update({ role: "owner" }).eq("conversation_id", id).eq("user_id", target);
+    if (promoted.error) {
+      // Put the previous owner back so the group is never left without one.
+      if (previousOwner) await sb.from("dm_members").update({ role: "owner" }).eq("conversation_id", id).eq("user_id", previousOwner);
+      throw promoted.error;
+    }
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: "オーナーを変更できませんでした。" });
   }
 });
 

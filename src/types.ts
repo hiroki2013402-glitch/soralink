@@ -59,7 +59,7 @@ export type AdminDmMember = { id:string; display_name:string; avatar_url:string|
 export type AdminDmConversation = { id:string; is_group:boolean; title:string|null; last_message_at:string; last_preview:string|null; last_sender_name:string|null; members:AdminDmMember[] };
 export type AdminDmMessage = { id:string; sender_id:string; sender_name:string; created_at:string; kind:"text"|"image"; body:string|null; image_url:string|null };
 export type AdminDmDetail = {
-  conversation: { id:string; is_group:boolean; title:string|null; description:string|null; members:AdminDmMember[] };
+  conversation: { id:string; is_group:boolean; title:string|null; description:string|null; icon_url?:string|null; members:AdminDmMember[] };
   messages: AdminDmMessage[];
   hasMore: boolean;
 };

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { ArrowLeft, LoaderCircle, Search } from "lucide-react";
+import { ArrowLeft, LoaderCircle, Search, Settings } from "lucide-react";
 import { api } from "../../lib/api";
 import { errorMessage } from "../../lib/errors";
-import type { AdminDmConversation, AdminDmDetail, AdminDmMember } from "../../types";
+import GroupInfoSheet from "../messages/GroupInfoSheet";
+import NewMessageSheet from "../messages/NewMessageSheet";
+import "../messages/dm-actions.css";
+import type { AdminDmConversation, AdminDmDetail, AdminDmMember, DmDetailConversation, DmMember } from "../../types";
 import { formatAdminDate } from "./adminFormat";
 
 type Props = { initialUserId: string; onNotice: (text: string) => void };
@@ -72,6 +75,8 @@ function DmThread({ conversationId, onBack, onNotice }: { conversationId: string
   const [detail, setDetail] = useState<AdminDmDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [managing, setManaging] = useState(false);
+  const [adding, setAdding] = useState(false);
   const path = `/admin/dm/conversations/${encodeURIComponent(conversationId)}`;
 
   useEffect(() => {
@@ -81,6 +86,13 @@ function DmThread({ conversationId, onBack, onNotice }: { conversationId: string
       .catch(e => onNotice(errorMessage(e, "会話を読み込めませんでした。")))
       .finally(() => setLoading(false));
   }, [path, onNotice]);
+
+  // Reloads the group header and members after a change. Messages already on screen stay as they are.
+  const refreshHeader = () => {
+    api<AdminDmDetail>(path)
+      .then(r => setDetail(current => (current ? { ...current, conversation: r.conversation } : r)))
+      .catch(e => onNotice(errorMessage(e, "グループ情報を読み込めませんでした。")));
+  };
 
   const loadOlder = async () => {
     if (!detail?.messages.length) return;
@@ -108,6 +120,11 @@ function DmThread({ conversationId, onBack, onNotice }: { conversationId: string
             <p className="admin-muted small">
               {detail.conversation.is_group ? "グループ" : "1対1"} ・ 参加者: {namesOf(detail.conversation.members)}
             </p>
+            {detail.conversation.is_group && (
+              <button type="button" className="outline-small" onClick={() => setManaging(true)}>
+                <Settings size={14} />グループを管理
+              </button>
+            )}
           </header>
           {detail.hasMore && (
             <div className="admin-actions-row">
@@ -129,6 +146,34 @@ function DmThread({ conversationId, onBack, onNotice }: { conversationId: string
               </div>
             )) : <p className="admin-muted">メッセージはありません。</p>}
           </div>
+          {managing && detail.conversation.is_group && (
+            <GroupInfoSheet
+              meId=""
+              conversation={{
+                id: detail.conversation.id,
+                is_group: true,
+                title: detail.conversation.title,
+                description: detail.conversation.description,
+                icon_url: detail.conversation.icon_url ?? null,
+                my_role: "owner",
+                members: detail.conversation.members as DmMember[]
+              } satisfies DmDetailConversation}
+              canLeave={false}
+              onLeave={() => undefined}
+              onClose={() => setManaging(false)}
+              onChanged={refreshHeader}
+              onAddMembers={() => setAdding(true)}
+              onNotice={onNotice}
+            />
+          )}
+          {adding && (
+            <NewMessageSheet
+              addTo={{ conversationId, existingIds: detail.conversation.members.map(m => m.id) }}
+              onClose={() => setAdding(false)}
+              onCreated={() => { setAdding(false); refreshHeader(); }}
+              onNotice={onNotice}
+            />
+          )}
         </>
       )}
     </section>

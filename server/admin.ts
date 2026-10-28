@@ -46,7 +46,7 @@ function passwordMatches(input: string) {
   return crypto.timingSafeEqual(a, b);
 }
 
-async function audit(adminId: string, action: string, target: string | null, detail: string | null) {
+export async function audit(adminId: string, action: string, target: string | null, detail: string | null) {
   await db.execute({
     sql: "INSERT INTO admin_audit(id, admin_id, action, target, detail, created_at) VALUES(?,?,?,?,?,?)",
     args: [crypto.randomUUID(), adminId, action, target, detail ? detail.slice(0, 500) : null, new Date().toISOString()]
@@ -175,8 +175,8 @@ admin.post("/admin/users/:id/ban", ...requireAdmin, async (req, res) => {
     const target = await db.execute({ sql: "SELECT id FROM users WHERE id = ?", args: [id] });
     if (!target.rows.length) return res.status(404).json({ error: "ユーザーが見つかりません。" });
     const otherAdmin = await db.execute({
-      sql: "SELECT 1 FROM sessions WHERE user_id = ? AND is_admin = 1 AND expires_at > ?",
-      args: [id, Date.now()]
+      sql: "SELECT 1 FROM sessions WHERE user_id = ? AND is_admin = 1",
+      args: [id]
     });
     if (otherAdmin.rows.length) return res.status(400).json({ error: "管理者アカウントは停止できません。" });
     const reason = parsed.data.reason || null;
@@ -367,7 +367,7 @@ admin.get("/admin/dm/conversations/:id", ...requireAdmin, async (req, res) => {
   const before = typeof req.query.before === "string" && !Number.isNaN(Date.parse(req.query.before)) ? req.query.before : "";
   try {
     const [conv, members] = await Promise.all([
-      sb.from("dm_conversations").select("id, is_group, title, description").eq("id", id).maybeSingle(),
+      sb.from("dm_conversations").select("id, is_group, title, description, icon_path").eq("id", id).maybeSingle(),
       sb.from("dm_members").select("user_id, role, joined_at").eq("conversation_id", id)
     ]);
     if (conv.error) throw conv.error;
@@ -390,6 +390,7 @@ admin.get("/admin/dm/conversations/:id", ...requireAdmin, async (req, res) => {
         is_group: conv.data.is_group,
         title: conv.data.title,
         description: conv.data.description ?? null,
+        icon_url: conv.data.icon_path ? `/api/dm/conversations/${id}/icon?v=${encodeURIComponent(String(conv.data.icon_path).split("/").pop() ?? "")}` : null,
         members: memberRows.map(m => ({ ...(people.get(m.user_id) ?? unknownPerson(m.user_id)), role: m.role }))
       },
       messages: rows.slice(0, DM_PAGE_SIZE).reverse().map(m => ({

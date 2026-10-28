@@ -156,32 +156,16 @@ export async function startDmRealtime(userId: string) {
         emit({ type: "membership", conversationId: String(payload.new.conversation_id) });
       })
       .subscribe(status => watchStatus(String(status)));
+    // Broadcasts from other members are only a signal to reload. Any member can send to any member's topic,
+    // so the payload (sender, text, reactions) is never trusted. Screens fetch the truth from the server instead.
     ownChannel = supabase
       .channel(topicFor(userId), channelOptions)
-      .on("broadcast", { event: "message" }, ({ payload }) => {
-        const p = payload as { conversationId: string; message: DmRow };
-        emit({ type: "message", conversationId: p.conversationId, message: p.message });
-      })
-      .on("broadcast", { event: "unsend" }, ({ payload }) => {
-        const p = payload as { conversationId: string; messageId: string };
-        emit({ type: "unsend", conversationId: p.conversationId, messageId: p.messageId });
-      })
-      .on("broadcast", { event: "edit" }, ({ payload }) => {
-        const p = payload as { conversationId: string; messageId: string; body: string; editedAt: string };
-        emit({ type: "edit", conversationId: p.conversationId, messageId: p.messageId, body: p.body, editedAt: p.editedAt });
-      })
-      .on("broadcast", { event: "react" }, ({ payload }) => {
-        const p = payload as { conversationId: string; messageId: string; reactions: DmReactionEntry[] };
-        emit({ type: "react", conversationId: p.conversationId, messageId: p.messageId, reactions: p.reactions });
-      })
-      .on("broadcast", { event: "read" }, ({ payload }) => {
-        const p = payload as { conversationId: string; userId: string; readAt: string };
-        emit({ type: "read", conversationId: p.conversationId, userId: p.userId, readAt: p.readAt });
-      })
-      .on("broadcast", { event: "group" }, ({ payload }) => {
-        const p = payload as { conversationId: string };
-        emit({ type: "group", conversationId: p.conversationId });
-      })
+      .on("broadcast", { event: "message" }, () => requestResync())
+      .on("broadcast", { event: "unsend" }, () => requestResync())
+      .on("broadcast", { event: "edit" }, () => requestResync())
+      .on("broadcast", { event: "react" }, () => requestResync())
+      .on("broadcast", { event: "read" }, () => requestResync())
+      .on("broadcast", { event: "group" }, () => requestResync())
       .subscribe(status => watchStatus(String(status)));
     scheduleRefresh(current, config.expiresIn);
     // Anything sent while the socket was down is loaded from the server, and screens pick up the new subscriptions.
