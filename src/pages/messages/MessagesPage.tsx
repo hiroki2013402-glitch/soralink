@@ -14,7 +14,7 @@ type Props = {
   user: User;
   counts: Record<string, number>;
   selectedId?: string;
-  onOpenConversation: (id: string) => void;
+  onOpenConversation: (id: string, quote?: string) => void;
   onNotice: (text: string) => void;
 };
 
@@ -77,14 +77,14 @@ export default function MessagesPage({ user, counts, selectedId, onOpenConversat
     };
   }, [load]);
 
-  // Opens (or reuses) a 1:1 chat with someone whose note was tapped.
-  const startChat = async (userId: string) => {
+  // Opens (or reuses) a 1:1 chat with someone whose note was double-tapped. The quote goes into the composer.
+  const startChat = async (userId: string, quote?: string) => {
     try {
       const r = await api<{ id: string }>("/dm/conversations", {
         method: "POST",
         body: JSON.stringify({ userIds: [userId], title: "" })
       });
-      onOpenConversation(r.id);
+      onOpenConversation(r.id, quote);
     } catch (e) {
       onNotice(errorMessage(e, "会話を開けませんでした"));
     }
@@ -128,7 +128,7 @@ export default function MessagesPage({ user, counts, selectedId, onOpenConversat
         user={user}
         mine={notes.mine}
         notes={notes.notes}
-        onOpenChat={id => void startChat(id)}
+        onQuote={note => void startChat(note.user_id, `「${note.body}」`)}
         onChanged={() => void loadNotes()}
         onNotice={onNotice}
       />

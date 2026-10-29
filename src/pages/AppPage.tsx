@@ -278,7 +278,12 @@ export default function App() {
 
   const openPost = (id: string) => go(`/page/post/${encodeURIComponent(id)}`);
   const openImage = (id: string) => go(`/page/post/${encodeURIComponent(id)}/image`);
-  const openConversation = useCallback((id: string) => go(`/page/messages/${encodeURIComponent(id)}`), [go]);
+  // A chat opened with a quoted note carries that quote; any other open clears it.
+  const [dmQuote, setDmQuote] = useState<{ conversationId: string; text: string } | null>(null);
+  const openConversation = useCallback((id: string, quote?: string) => {
+    setDmQuote(quote ? { conversationId: id, text: quote } : null);
+    go(`/page/messages/${encodeURIComponent(id)}`);
+  }, [go]);
   const goMessages = useCallback(() => go("/page/messages"), [go]);
 
   const createPost = async (input: NewPost) => {
@@ -569,6 +574,7 @@ export default function App() {
                   onCountsChanged={refreshCounts}
                   onNotice={tell}
                   onOpenProfile={openProfile}
+                  quote={dmQuote?.conversationId === route.conversationId ? dmQuote : null}
                 />
               ) : (
                 <DmEmptyPane />

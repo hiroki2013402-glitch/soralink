@@ -30,6 +30,8 @@ type Props = {
   onCountsChanged: () => void;
   onNotice: (text: string) => void;
   onOpenProfile: (userId: string) => void;
+  // A note quoted from the messages list. Put into the composer, ready to send.
+  quote?: { text: string } | null;
 };
 
 type Row =
@@ -121,7 +123,7 @@ function mergeDetail(prev: Detail, fresh: Detail, keepIds: Set<string>): Detail 
 }
 
 // One conversation: Instagram-style bubbles, text and photo messages, replies, edits, reactions, unsend, realtime updates, read receipts and group settings.
-export default function ConversationPage({ user, conversationId, onBack, onCountsChanged, onNotice, onOpenProfile }: Props) {
+export default function ConversationPage({ user, conversationId, onBack, onCountsChanged, onNotice, onOpenProfile, quote }: Props) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
@@ -152,6 +154,13 @@ export default function ConversationPage({ user, conversationId, onBack, onCount
 
   useEffect(() => { detailRef.current = detail; }, [detail]);
   useEffect(() => { onlineRef.current = onlineIds; }, [onlineIds]);
+
+  // A quoted note is added to the composer so the person can add a line and send it.
+  useEffect(() => {
+    if (!quote) return;
+    setDraft(v => (v.trim() ? `${v}\n${quote.text}` : quote.text));
+    inputRef.current?.focus();
+  }, [quote]);
 
   const scrollBottom = useCallback(() => {
     const el = listRef.current;

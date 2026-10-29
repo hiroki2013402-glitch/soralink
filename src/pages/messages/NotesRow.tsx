@@ -1,5 +1,5 @@
 import { Plus, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import Avatar from "../../components/Avatar";
 import { api } from "../../lib/api";
@@ -8,19 +8,45 @@ import type { DmNote, User } from "../../types";
 
 export const NOTE_MAX_LENGTH = 60;
 
+// A single tap shows a note in full; a second tap within this time quotes it in a DM instead.
+const DOUBLE_TAP_MS = 300;
+
 type Props = {
   user: User;
   mine: DmNote | null;
   notes: DmNote[];
-  onOpenChat: (userId: string) => void;
+  onQuote: (note: DmNote) => void;
   onChanged: () => void;
   onNotice: (text: string) => void;
 };
 
-// Instagram-style notes: a row of short statuses above the message list. Your own is first and editable;
-// tapping someone else's note opens a chat with them.
-export default function NotesRow({ user, mine, notes, onOpenChat, onChanged, onNotice }: Props) {
+// Instagram-style notes: a row of short statuses above the message list. Your own is first and editable.
+// Tapping someone else's note shows it in full; double-tapping it quotes it in a DM to them.
+export default function NotesRow({ user, mine, notes, onQuote, onChanged, onNotice }: Props) {
   const [editing, setEditing] = useState(false);
+  const [viewing, setViewing] = useState<DmNote | null>(null);
+  // The note whose first tap is waiting to see whether a second tap follows.
+  const pendingRef = useRef<{ id: string; timer: number } | null>(null);
+
+  useEffect(() => () => {
+    if (pendingRef.current) window.clearTimeout(pendingRef.current.timer);
+  }, []);
+
+  const tapNote = (note: DmNote) => {
+    const pending = pendingRef.current;
+    if (pending && pending.id === note.user_id) {
+      window.clearTimeout(pending.timer);
+      pendingRef.current = null;
+      onQuote(note);
+      return;
+    }
+    if (pending) window.clearTimeout(pending.timer);
+    const timer = window.setTimeout(() => {
+      pendingRef.current = null;
+      setViewing(note);
+    }, DOUBLE_TAP_MS);
+    pendingRef.current = { id: note.user_id, timer };
+  };
 
   return (
     <>
@@ -38,10 +64,12 @@ export default function NotesRow({ user, mine, notes, onOpenChat, onChanged, onN
             name={note.display_name}
             avatar={note.avatar_url}
             text={note.body}
-            onClick={() => onOpenChat(note.user_id)}
+            onClick={() => tapNote(note)}
           />
         ))}
       </div>
+
+      {viewing && <NoteViewer note={viewing} onClose={() => setViewing(null)} />}
 
       {editing && (
         <NoteEditor
@@ -75,6 +103,26 @@ function NoteItem({ name, avatar, text, isMine = false, onClick }: {
       </span>
       <span className="dm-note-name">{isMine ? "あなた" : name}</span>
     </button>
+  );
+}
+
+// Someone else's note in full. Double-clicking (double-tapping on touch) the note in the row quotes it in a DM.
+function NoteViewer({ note, onClose }: { note: DmNote; onClose: () => void }) {
+  return (
+    <div className="dm-backdrop" onClick={onClose}>
+      <div className="dm-sheet dm-note-sheet" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={`${note.display_name}のノート`}>
+        <header className="dm-sheet-head">
+          <span className="dm-sheet-spacer" />
+          <strong>{note.display_name}のノート</strong>
+          <button type="button" className="dm-icon-btn" onClick={onClose} aria-label="閉じる"><X size={20} /></button>
+        </header>
+        <div className="dm-note-full">
+          <Avatar url={note.avatar_url} name={note.display_name} />
+          <p className="dm-note-full-text">{note.body}</p>
+        </div>
+        <p className="dm-note-hint">ダブルクリック（スマホはダブルタップ）すると、このノートを引用してメッセージを送れます。</p>
+      </div>
+    </div>
   );
 }
 
